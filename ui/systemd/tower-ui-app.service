@@ -1,0 +1,18 @@
+[Unit]
+Description=Tower UI web app
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=al
+Group=al
+EnvironmentFile=/etc/default/tower-ui-app
+ExecStart=/usr/bin/python3 /home/al/tower_ui_app.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

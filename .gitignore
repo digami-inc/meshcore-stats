@@ -1,0 +1,11 @@
+*.bak.*
+__pycache__/
+*.pyc
+*.pyo
+.env
+*.log
+venv/
+.venv/
+*.sqlite
+repeater_status_spool.jsonl
+.DS_Store
