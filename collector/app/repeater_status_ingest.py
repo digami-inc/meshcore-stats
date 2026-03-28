@@ -3,6 +3,8 @@
 import asyncio
 import json
 import os
+import random
+import subprocess
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -15,9 +17,16 @@ SERIAL_PORT = os.getenv("SERIAL_PORT", "/dev/ttyACM0")
 REPEATER_NAME = os.getenv("REPEATER_NAME", "Inciema Tornis")
 REPEATER_PASSWORD = os.getenv("REPEATER_PASSWORD", "")
 POLL_INTERVAL_SEC = int(os.getenv("POLL_INTERVAL_SEC", "300"))
+MESHCLI_BIN = os.getenv("MESHCLI_BIN", "/home/al/.local/bin/meshcli")
 STATUS_TIMEOUT_SEC = float(os.getenv("STATUS_TIMEOUT_SEC", "25"))
 CONNECT_TIMEOUT_SEC = float(os.getenv("CONNECT_TIMEOUT_SEC", "20"))
 CONTACT_REFRESH_SEC = int(os.getenv("CONTACT_REFRESH_SEC", "900"))
+NEIGHBOURS_INTERVAL_SEC = int(os.getenv("NEIGHBOURS_INTERVAL_SEC", "3600"))
+NEIGHBOURS_JITTER_SEC = int(os.getenv("NEIGHBOURS_JITTER_SEC", "900"))
+NEIGHBOURS_TIMEOUT_SEC = float(os.getenv("NEIGHBOURS_TIMEOUT_SEC", "25"))
+NEIGHBOURS_MAX_ATTEMPTS = int(os.getenv("NEIGHBOURS_MAX_ATTEMPTS", "2"))
+NEIGHBOURS_RETRY_MIN_SEC = float(os.getenv("NEIGHBOURS_RETRY_MIN_SEC", "15"))
+NEIGHBOURS_RETRY_MAX_SEC = float(os.getenv("NEIGHBOURS_RETRY_MAX_SEC", "45"))
 PATH_SETTLE_SEC = float(os.getenv("PATH_SETTLE_SEC", "3"))
 RELOGIN_INTERVAL_SEC = int(os.getenv("RELOGIN_INTERVAL_SEC", "3600"))
 LOGIN_SETTLE_SEC = float(os.getenv("LOGIN_SETTLE_SEC", "2"))
@@ -94,6 +103,24 @@ def get_contact_prefix(contact: dict | None) -> str:
     return META_NODE
 
 
+def get_contact_name(contact: dict | None) -> str | None:
+    if not contact:
+        return None
+    for key in ("adv_name", "name"):
+        value = contact.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def extract_json(text: str) -> dict:
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end < start:
+        raise ValueError("No JSON object found in meshcli output")
+    return json.loads(text[start:end + 1])
+
+
 def describe_contact_route(contact: dict | None) -> str:
     if not contact:
         return "route=unknown"
@@ -117,6 +144,25 @@ def describe_contact_route(contact: dict | None) -> str:
     if last_mod is not None:
         parts.append(f"lastmod={last_mod}")
     return " ".join(parts) if parts else "route=unknown"
+
+
+def classify_neighbours_error(text: str) -> str:
+    lower = text.lower()
+    if "keyerror: \'name\'" in lower or "error: \'name\'" in lower:
+        return "cli_keyerror_name"
+    if "no_event_received" in lower:
+        return "no_event_received"
+    if "no json object found" in lower:
+        return "invalid_json"
+    if "timeout" in lower:
+        return "timeout"
+    return "other"
+
+
+def neighbour_retry_delay() -> float:
+    low = max(0.0, NEIGHBOURS_RETRY_MIN_SEC)
+    high = max(low, NEIGHBOURS_RETRY_MAX_SEC)
+    return random.uniform(low, high)
 
 
 def build_record_from_status(data: dict, fallback_node: str) -> tuple[str, dict | None, str | None, str]:
@@ -242,6 +288,42 @@ def db_insert_poll_log(
     finally:
         conn.close()
 
+
+
+def db_insert_neighbour_records(collected_ts: str, repeater_node: str, rows: list[dict]) -> None:
+    if not rows:
+        return
+
+    conn = db_connect()
+    try:
+        with conn.cursor() as cur:
+            cur.executemany(
+                """
+                INSERT INTO repeater_neighbors_history (
+                    collected_ts,
+                    repeater_node,
+                    neighbor_pubkey_pre,
+                    neighbor_name,
+                    neighbor_seen_ts,
+                    snr_x4,
+                    snr_db
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """,
+                [
+                    (
+                        collected_ts,
+                        repeater_node,
+                        row["neighbor_pubkey_pre"],
+                        row.get("neighbor_name"),
+                        row["neighbor_seen_ts"],
+                        row["snr_x4"],
+                        row["snr_db"],
+                    )
+                    for row in rows
+                ],
+            )
+    finally:
+        conn.close()
 
 def db_upsert_meta(
     node: str,
@@ -439,14 +521,30 @@ def save_record(rec: dict) -> None:
         log(f"DB unavailable, queued locally: {e}")
 
 
+def save_neighbour_records(repeater_node: str, rows: list[dict]) -> None:
+    if not rows:
+        return
+    try:
+        db_insert_neighbour_records(
+            collected_ts=now_str(),
+            repeater_node=repeater_node,
+            rows=rows,
+        )
+        log(f"Inserted {len(rows)} neighbour rows for node={repeater_node}")
+    except Exception as e:
+        log(f"Neighbour insert failed: {e}")
+
+
 class MeshStatusSession:
     def __init__(self) -> None:
         self.meshcore: MeshCore | None = None
         self.contact: dict | None = None
+        self.contact_prefix_map: list[tuple[str, str]] = []
         self.last_contact_refresh = 0.0
         self.last_login_ts = 0.0
         self.consecutive_failures = 0
         self.login_events: asyncio.Queue[tuple[str, dict]] = asyncio.Queue()
+        self.next_neighbours_due_ts = 0.0
         self.login_success_sub = None
         self.login_failed_sub = None
 
@@ -458,6 +556,7 @@ class MeshStatusSession:
                 log(f"Disconnect failed: {e}")
             self.meshcore = None
         self.contact = None
+        self.contact_prefix_map = []
         self.last_contact_refresh = 0.0
         self.last_login_ts = 0.0
 
@@ -476,7 +575,7 @@ class MeshStatusSession:
 
         log(f"Connecting to MeshCore companion on {SERIAL_PORT}")
         self.meshcore = await asyncio.wait_for(
-            MeshCore.create_serial(SERIAL_PORT),
+            MeshCore.create_serial(SERIAL_PORT, debug=True),
             timeout=CONNECT_TIMEOUT_SEC,
         )
 
@@ -490,6 +589,8 @@ class MeshStatusSession:
         )
 
         await self.refresh_contact(force=True)
+        if self.next_neighbours_due_ts <= 0:
+            self.next_neighbours_due_ts = time.time() + random.uniform(60, max(60, NEIGHBOURS_JITTER_SEC))
         self.consecutive_failures = 0
 
     async def refresh_contact(self, force: bool = False) -> dict | None:
@@ -501,6 +602,13 @@ class MeshStatusSession:
             result = await self.meshcore.commands.get_contacts()
             if result.type == EventType.ERROR:
                 raise RuntimeError(f"get_contacts failed: {result.payload}")
+            payload = getattr(result, "payload", {}) or {}
+            self.contact_prefix_map = []
+            for item in payload.values():
+                pubkey = get_contact_pubkey(item)
+                name = get_contact_name(item)
+                if pubkey and name:
+                    self.contact_prefix_map.append((pubkey.lower(), name))
             self.last_contact_refresh = now
 
         self.contact = self.meshcore.get_contact_by_name(REPEATER_NAME)
@@ -599,17 +707,145 @@ class MeshStatusSession:
         await asyncio.sleep(PATH_SETTLE_SEC)
         await self.refresh_contact(force=True)
 
+
+    def neighbours_due(self) -> bool:
+        return time.time() >= self.next_neighbours_due_ts
+
+    def schedule_next_neighbours(self) -> None:
+        jitter = random.uniform(0, max(0, NEIGHBOURS_JITTER_SEC))
+        self.next_neighbours_due_ts = time.time() + NEIGHBOURS_INTERVAL_SEC + jitter
+
+    def resolve_contact_name_by_prefix(self, pubkey_prefix: str) -> str | None:
+        prefix = pubkey_prefix.strip().lower()
+        if not prefix:
+            return None
+        matches = sorted({name for full_pubkey, name in self.contact_prefix_map if full_pubkey.startswith(prefix)})
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            log(f"Neighbour name ambiguous for prefix {pubkey_prefix}: {matches}")
+        return None
+
+    async def run_meshcli_json(self, *args: str, timeout: float) -> dict:
+        cmd = [MESHCLI_BIN, "-j", "-s", SERIAL_PORT, *args]
+        log(f"Running meshcli JSON command: {' '.join(repr(x) for x in cmd[4:])}")
+
+        def _run() -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+
+        result = await asyncio.to_thread(_run)
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"meshcli failed rc={result.returncode}, stdout={result.stdout!r}, stderr={result.stderr!r}"
+            )
+
+        try:
+            return extract_json(result.stdout)
+        except Exception as e:
+            raise RuntimeError(
+                f"meshcli returned no valid JSON: {e}; stdout={result.stdout!r}, stderr={result.stderr!r}"
+            ) from e
+
+    async def collect_neighbours(self) -> tuple[str, list[dict] | None, str | None, str]:
+        await self.connect()
+        contact = await self.ensure_contact(force_refresh=False)
+        fallback_node = get_contact_prefix(contact)
+        last_error_text = None
+
+        max_attempts = max(1, NEIGHBOURS_MAX_ATTEMPTS)
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                payload = await self.run_meshcli_json(
+                    "req_neighbours",
+                    REPEATER_NAME,
+                    timeout=NEIGHBOURS_TIMEOUT_SEC,
+                )
+
+                neighbours = payload.get("neighbours") or []
+                repeater_node = str(
+                    payload.get("pubkey_prefix")
+                    or payload.get("pubkey_pre")
+                    or fallback_node
+                )
+
+                rows: list[dict] = []
+                now_ts = int(time.time())
+                for item in neighbours:
+                    pubkey_pre = str(item.get("pubkey") or item.get("pubkey_pre") or "").strip()
+                    if not pubkey_pre:
+                        continue
+                    secs_ago = int(item.get("secs_ago", 0))
+                    snr_db = float(item.get("snr"))
+                    rows.append(
+                        {
+                            "neighbor_pubkey_pre": pubkey_pre,
+                            "neighbor_name": self.resolve_contact_name_by_prefix(pubkey_pre),
+                            "neighbor_seen_ts": now_ts - secs_ago,
+                            "snr_x4": int(round(snr_db * 4)),
+                            "snr_db": snr_db,
+                        }
+                    )
+
+                self.schedule_next_neighbours()
+                log(
+                    f"Collected {len(rows)} neighbours via meshcli for {REPEATER_NAME} ({repeater_node}) "
+                    f"on attempt {attempt}/{max_attempts}"
+                )
+                return ("valid", rows, None, repeater_node)
+
+            except Exception as e:
+                err_text = str(e)
+                err_kind = classify_neighbours_error(err_text)
+                last_error_text = shorten_error(err_text)
+                log(
+                    f"collect_neighbours attempt {attempt}/{max_attempts} failed "
+                    f"[{err_kind}]: {err_text}"
+                )
+
+                if attempt >= max_attempts:
+                    break
+
+                delay = neighbour_retry_delay()
+                log(f"Retrying neighbour collection in {delay:.1f}s")
+                await asyncio.sleep(delay)
+
+        self.schedule_next_neighbours()
+        return ("error", None, last_error_text, fallback_node)
+
     async def collect_status(self) -> tuple[str, dict | None, str | None, str]:
         try:
             await self.connect()
             contact = await self.ensure_contact(force_refresh=False)
             await self.login_if_needed(force=False)
 
-            result = await self.meshcore.commands.req_status(contact, timeout=STATUS_TIMEOUT_SEC)
-            if result.type == EventType.ERROR:
-                raise RuntimeError(f"req_status failed: {result.payload}")
+            log(f"Status route snapshot: {describe_contact_route(contact)}")
 
-            data = result.payload
+            dst = get_contact_pubkey(contact) or contact
+            sent = await self.meshcore.commands.send_statusreq(dst)
+            if getattr(sent, "type", None) == EventType.ERROR:
+                raise RuntimeError(f"send_statusreq failed: {getattr(sent, 'payload', None)}")
+
+            result = await self.meshcore.wait_for_event(
+                EventType.STATUS_RESPONSE,
+                timeout=STATUS_TIMEOUT_SEC,
+            )
+
+            if result is None:
+                raise RuntimeError("wait_for_event STATUS_RESPONSE timed out")
+
+            if getattr(result, "type", None) == EventType.ERROR:
+                raise RuntimeError(f"status wait failed: {getattr(result, 'payload', None)}")
+
+            data = getattr(result, "payload", None)
+            if data is None:
+                raise RuntimeError(f"STATUS_RESPONSE returned no payload: {result!r}")
             fallback_node = get_contact_prefix(contact)
             status, rec, error_text, node = build_record_from_status(data, fallback_node)
             if status == "valid":
@@ -665,6 +901,13 @@ async def run_poll(session: MeshStatusSession, next_poll_at: str | None) -> None
         save_record(rec)
     else:
         log(f"No valid repeater status collected in this run (status={status})")
+
+    if session.neighbours_due():
+        n_status, n_rows, n_error_text, n_node = await session.collect_neighbours()
+        if n_status == "valid" and n_rows is not None:
+            save_neighbour_records(n_node, n_rows)
+        else:
+            log(f"No valid neighbour snapshot collected in this run (status={n_status}, error={n_error_text})")
 
     safe_update_meta(
         node=node,
