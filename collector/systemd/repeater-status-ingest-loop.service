@@ -1,0 +1,17 @@
+[Unit]
+Description=Repeater status ingest loop
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=/etc/repeater-status-ingest/repeater-status-ingest.env
+Type=simple
+User=al
+WorkingDirectory=/opt/repeater-status-ingest
+# Uncomment if the repeater requires explicit login refresh:
+ExecStart=/home/al/venvs/repeater-status/bin/python /opt/repeater-status-ingest/repeater_status_ingest.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
