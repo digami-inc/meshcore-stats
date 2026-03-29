@@ -27,6 +27,7 @@ NEIGHBOURS_TIMEOUT_SEC = float(os.getenv("NEIGHBOURS_TIMEOUT_SEC", "25"))
 NEIGHBOURS_MAX_ATTEMPTS = int(os.getenv("NEIGHBOURS_MAX_ATTEMPTS", "2"))
 NEIGHBOURS_RETRY_MIN_SEC = float(os.getenv("NEIGHBOURS_RETRY_MIN_SEC", "15"))
 NEIGHBOURS_RETRY_MAX_SEC = float(os.getenv("NEIGHBOURS_RETRY_MAX_SEC", "45"))
+NEIGHBOURS_RETRY_INTERVAL_SEC = int(os.getenv("NEIGHBOURS_RETRY_INTERVAL_SEC", "600"))
 PATH_SETTLE_SEC = float(os.getenv("PATH_SETTLE_SEC", "3"))
 RELOGIN_INTERVAL_SEC = int(os.getenv("RELOGIN_INTERVAL_SEC", "3600"))
 LOGIN_SETTLE_SEC = float(os.getenv("LOGIN_SETTLE_SEC", "2"))
@@ -1133,8 +1134,12 @@ async def _patched_collect_neighbours(self) -> tuple[str, list[dict] | None, str
         log(f"Retrying neighbour collection in {delay:.1f}s")
         await asyncio.sleep(delay)
 
-    self.schedule_next_neighbours()
+    self.schedule_retry_neighbours()
     return ("error", None, last_error_text, fallback_node)
+
+
+def _patched_schedule_retry_neighbours(self) -> None:
+    self.next_neighbours_due_ts = time.time() + max(60, NEIGHBOURS_RETRY_INTERVAL_SEC)
 
 
 def _apply_neighbour_stability_patch() -> None:
@@ -1143,6 +1148,7 @@ def _apply_neighbour_stability_patch() -> None:
     MeshStatusSession.run_meshcli_json = _patched_run_meshcli_json
     MeshStatusSession.run_meshcli_json_exclusive = _patched_run_meshcli_json_exclusive
     MeshStatusSession.collect_neighbours = _patched_collect_neighbours
+    MeshStatusSession.schedule_retry_neighbours = _patched_schedule_retry_neighbours
 
 
 _apply_neighbour_stability_patch()
