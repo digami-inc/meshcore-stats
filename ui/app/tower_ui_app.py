@@ -418,6 +418,14 @@ HTML = r"""
       max-height: 260px;
     }
 
+    .page-footer {
+      margin-top: 18px;
+      text-align: center;
+      font-size: 11px;
+      color: var(--muted);
+      opacity: .85;
+    }
+
     @media (max-width: 980px) {
       .cards { grid-template-columns: repeat(2, 1fr); }
       .neighbors-list { grid-template-columns: 1fr; }
@@ -544,6 +552,7 @@ HTML = r"""
     </div>
     <canvas id="snrChart" height="120"></canvas>
   </div>
+  <div class="page-footer">&copy; Digami 2026</div>
 </div>
 
 <script>
@@ -1741,19 +1750,17 @@ def api_latest():
     row["battery_24h_max_v"] = round(max(battery_vals), 3) if battery_vals else None
 
     row["battery_trend_direction"] = None
-    if len(battery_recent_rows) >= 3:
+    if len(battery_recent_rows) >= 2:
         current_mv = battery_recent_rows[0].get("bat_mv")
         prev1_mv = battery_recent_rows[1].get("bat_mv")
-        prev2_mv = battery_recent_rows[2].get("bat_mv")
 
-        if current_mv is not None and prev1_mv is not None and prev2_mv is not None:
+        if current_mv is not None and prev1_mv is not None:
             current_mv = int(current_mv)
             prev1_mv = int(prev1_mv)
-            prev2_mv = int(prev2_mv)
 
-            if current_mv > prev1_mv and current_mv > prev2_mv:
+            if current_mv > prev1_mv:
                 row["battery_trend_direction"] = "up"
-            elif current_mv < prev1_mv and current_mv < prev2_mv:
+            elif current_mv < prev1_mv:
                 row["battery_trend_direction"] = "down"
 
     noise_vals = []
