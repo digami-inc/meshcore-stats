@@ -574,7 +574,8 @@ let latestPollSuccessRate24h = null;
 let latestNeighbours = [];
 let latestNeighboursCollectedTs = null;
 
-let battery24hDeltaV = null;
+let battery24hMinV = null;
+let battery24hMaxV = null;
 let latestBatteryTrendDirection = null;
 let noiseFloorBaselineDbm = null;
 let linkMarginBaselineDb = null;
@@ -864,11 +865,14 @@ function renderBatteryTrendArrow() {
 function renderBatteryMeta() {
   const el = document.getElementById('battery-meta');
   if (!el) return;
-  if (battery24hDeltaV == null || isNaN(battery24hDeltaV)) {
-    el.textContent = '24h trend: --';
+  if (
+    battery24hMinV == null || isNaN(battery24hMinV) ||
+    battery24hMaxV == null || isNaN(battery24hMaxV)
+  ) {
+    el.textContent = '24h range: --';
     return;
   }
-  el.textContent = `24h trend: ${fmtSigned(battery24hDeltaV, 3, ' V')}`;
+  el.textContent = `24h range: ${Number(battery24hMinV).toFixed(3)}–${Number(battery24hMaxV).toFixed(3)} V`;
 }
 
 function renderNoiseCard() {
@@ -1244,8 +1248,14 @@ function updateBatteryChartMeta(batterySeries) {
   }
 
   const now = batterySeries[batterySeries.length - 1];
-  const trendText = battery24hDeltaV == null ? '--' : fmtSigned(battery24hDeltaV, 3, ' V');
-  el.textContent = `now ${fmtMaybe(now, 3, ' V')} | range ${fmtMaybe(mm.min, 3)}–${fmtMaybe(mm.max, 3)} V | 24h Δ ${trendText}`;
+  const dayRangeText = (
+    battery24hMinV == null || isNaN(battery24hMinV) ||
+    battery24hMaxV == null || isNaN(battery24hMaxV)
+  )
+    ? '--'
+    : `${Number(battery24hMinV).toFixed(3)}–${Number(battery24hMaxV).toFixed(3)} V`;
+
+  el.textContent = `now ${fmtMaybe(now, 3, ' V')} | chart range ${fmtMaybe(mm.min, 3)}–${fmtMaybe(mm.max, 3)} V | 24h range ${dayRangeText}`;
 }
 
 function updateNoiseChartMeta(noiseSeries) {
@@ -1435,7 +1445,8 @@ async function loadLatest() {
     }
   }
 
-  battery24hDeltaV = d.battery_24h_delta_v == null ? null : Number(d.battery_24h_delta_v);
+  battery24hMinV = d.battery_24h_min_v == null ? null : Number(d.battery_24h_min_v);
+  battery24hMaxV = d.battery_24h_max_v == null ? null : Number(d.battery_24h_max_v);
   noiseFloorBaselineDbm = d.noise_floor_baseline_dbm == null ? null : Number(d.noise_floor_baseline_dbm);
   linkMarginBaselineDb = d.link_margin_baseline_db == null ? null : Number(d.link_margin_baseline_db);
   snrBaselineDb = d.snr_baseline_db == null ? null : Number(d.snr_baseline_db);
@@ -1726,7 +1737,8 @@ def api_latest():
         for r in battery_rows
         if r.get("bat_mv") is not None
     ]
-    row["battery_24h_delta_v"] = round(battery_vals[-1] - battery_vals[0], 3) if len(battery_vals) >= 2 else None
+    row["battery_24h_min_v"] = round(min(battery_vals), 3) if battery_vals else None
+    row["battery_24h_max_v"] = round(max(battery_vals), 3) if battery_vals else None
 
     row["battery_trend_direction"] = None
     if len(battery_recent_rows) >= 3:
