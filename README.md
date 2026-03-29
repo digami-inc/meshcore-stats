@@ -1,6 +1,6 @@
 # meshcore-stats
 
-Private project for Inciema tower MeshCore telemetry tools.
+Project for Inciema tower MeshCore telemetry tools.
 
 ## Layout
 
