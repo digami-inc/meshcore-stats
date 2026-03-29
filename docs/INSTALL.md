@@ -51,7 +51,7 @@ sudo apt update
 sudo apt install -y git python3 python3-venv
 
 2. Clone the repository
-git clone <YOUR_REPO_URL>
+git clone https://github.com/digami-inc/meshcore-stats.git
 cd meshcore-stats
 
 3. Create a virtual environment
