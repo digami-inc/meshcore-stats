@@ -138,11 +138,18 @@ HTML = r"""
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      min-width: 18px;
-      font-size: 22px;
-      font-weight: 700;
-      line-height: 1;
+      width: 16px;
+      height: 16px;
       color: var(--muted);
+      position: relative;
+      top: 1px;
+      flex: 0 0 auto;
+    }
+
+    .trend-arrow svg {
+      display: block;
+      width: 16px;
+      height: 16px;
     }
 
     .trend-arrow.up {
@@ -828,28 +835,30 @@ function renderBatteryTrendArrow() {
   const el = document.getElementById('battery-trend-arrow');
   if (!el) return;
 
+  const svgUp = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2 L13 7 H10 V14 H6 V7 H3 Z" fill="currentColor"/></svg>';
+  const svgDown = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6 2 H10 V9 H13 L8 14 L3 9 H6 Z" fill="currentColor"/></svg>';
+
   el.className = 'trend-arrow';
+  el.innerHTML = svgUp;
 
   if (batteryDisplayMode !== 'v') {
     el.classList.add('hidden', 'neutral');
-    el.textContent = '↑';
     return;
   }
 
   if (latestBatteryTrendDirection === 'up') {
     el.classList.add('up');
-    el.textContent = '↑';
+    el.innerHTML = svgUp;
     return;
   }
 
   if (latestBatteryTrendDirection === 'down') {
     el.classList.add('down');
-    el.textContent = '↓';
+    el.innerHTML = svgDown;
     return;
   }
 
   el.classList.add('hidden', 'neutral');
-  el.textContent = '↑';
 }
 
 function renderBatteryMeta() {
