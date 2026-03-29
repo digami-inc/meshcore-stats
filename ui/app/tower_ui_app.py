@@ -166,7 +166,7 @@ HTML = r"""
     }
 
     .trend-arrow.hidden {
-      visibility: hidden;
+      display: none;
     }
 
     .meta {
