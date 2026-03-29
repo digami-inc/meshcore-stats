@@ -876,6 +876,277 @@ class MeshStatusSession:
 
             return ("error", None, msg, fallback_node)
 
+
+
+# --- neighbour stability monkey patch ---
+def _parse_expected_count(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_neighbour_payload(payload: Any) -> tuple[list[dict], dict[str, Any]]:
+    if isinstance(payload, list):
+        return payload, {}
+
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"Unexpected neighbour payload type: {type(payload).__name__}")
+
+    neighbours = payload.get("neighbours")
+    if neighbours is None:
+        neighbours = payload.get("results")
+
+    if neighbours is None and isinstance(payload.get("payload"), dict):
+        nested_payload = payload["payload"]
+        neighbours = nested_payload.get("neighbours") or nested_payload.get("results")
+        if isinstance(neighbours, list):
+            merged_meta = dict(payload)
+            merged_meta.update(nested_payload)
+            return neighbours, merged_meta
+
+    if neighbours is None:
+        raise RuntimeError(f"Neighbour payload missing neighbours list: {payload!r}")
+
+    if not isinstance(neighbours, list):
+        raise RuntimeError(f"Neighbour payload has non-list neighbours: {type(neighbours).__name__}")
+
+    return neighbours, payload
+
+
+def _patched_build_neighbour_rows(self, payload: Any, fallback_node: str) -> tuple[list[dict], str]:
+    neighbours, meta = _extract_neighbour_payload(payload)
+    repeater_node = str(
+        meta.get("pubkey_prefix")
+        or meta.get("pubkey_pre")
+        or meta.get("pubkey")
+        or fallback_node
+    )
+
+    results_count = _parse_expected_count(meta.get("results_count"))
+    neighbours_count = _parse_expected_count(meta.get("neighbours_count"))
+
+    if results_count is not None and len(neighbours) != results_count:
+        raise RuntimeError(
+            f"Neighbour payload incomplete: len(neighbours)={len(neighbours)} results_count={results_count}"
+        )
+
+    if (
+        results_count is not None
+        and neighbours_count is not None
+        and results_count < neighbours_count
+    ):
+        raise RuntimeError(
+            f"Neighbour payload truncated: results_count={results_count} neighbours_count={neighbours_count}"
+        )
+
+    rows: list[dict] = []
+    now_ts = int(time.time())
+    for item in neighbours:
+        if not isinstance(item, dict):
+            continue
+
+        pubkey_pre = str(item.get("pubkey") or item.get("pubkey_pre") or "").strip()
+        if not pubkey_pre:
+            continue
+
+        secs_ago_raw = item.get("secs_ago", 0)
+        snr_raw = item.get("snr")
+
+        try:
+            secs_ago = int(secs_ago_raw)
+        except (TypeError, ValueError):
+            secs_ago = 0
+
+        try:
+            snr_db = float(snr_raw)
+        except (TypeError, ValueError):
+            continue
+
+        rows.append(
+            {
+                "neighbor_pubkey_pre": pubkey_pre,
+                "neighbor_name": self.resolve_contact_name_by_prefix(pubkey_pre),
+                "neighbor_seen_ts": now_ts - max(0, secs_ago),
+                "snr_x4": int(round(snr_db * 4)),
+                "snr_db": snr_db,
+            }
+        )
+
+    return rows, repeater_node
+
+
+
+async def _patched_collect_neighbours_via_meshcore(self, contact: dict) -> tuple[list[dict], str]:
+    if self.meshcore is None:
+        raise RuntimeError("MeshCore is not connected")
+
+    fetch_all_neighbours = getattr(self.meshcore.commands, "fetch_all_neighbours", None)
+    if not callable(fetch_all_neighbours):
+        raise RuntimeError("meshcore.commands.fetch_all_neighbours is not available")
+
+    try:
+        result = await fetch_all_neighbours(contact, timeout=NEIGHBOURS_TIMEOUT_SEC)
+    except TypeError:
+        result = await fetch_all_neighbours(contact)
+
+    if getattr(result, "type", None) == EventType.ERROR:
+        raise RuntimeError(f"fetch_all_neighbours failed: {getattr(result, 'payload', None)}")
+
+    payload = getattr(result, "payload", result)
+    if payload is None:
+        raise RuntimeError("fetch_all_neighbours returned no payload")
+
+    fallback_node = get_contact_prefix(contact)
+    return self.build_neighbour_rows(payload, fallback_node)
+
+
+async def _patched_run_meshcli_json(self, *args: str, timeout: float) -> dict:
+    cmd = [MESHCLI_BIN, "-j", "-s", SERIAL_PORT, *args]
+    log(f"Running meshcli JSON command: {' '.join(repr(x) for x in cmd[4:])}")
+
+    def _run() -> subprocess.CompletedProcess[str]:
+        fallback_home = Path(os.getenv("MESHCLI_FALLBACK_HOME", "/tmp/meshcli-fallback"))
+        fallback_home.mkdir(parents=True, exist_ok=True)
+        xdg_config_home = fallback_home / ".config"
+        xdg_config_home.mkdir(parents=True, exist_ok=True)
+
+        env = os.environ.copy()
+        env["HOME"] = str(fallback_home)
+        env["XDG_CONFIG_HOME"] = str(xdg_config_home)
+
+        return subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+            env=env,
+        )
+
+    result = await asyncio.to_thread(_run)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"meshcli failed rc={result.returncode}, stdout={result.stdout!r}, stderr={result.stderr!r}"
+        )
+
+    try:
+        return extract_json(result.stdout)
+    except Exception as e:
+        raise RuntimeError(
+            f"meshcli returned no valid JSON: {e}; stdout={result.stdout!r}, stderr={result.stderr!r}"
+        ) from e
+
+
+async def _patched_run_meshcli_json_exclusive(self, *args: str, timeout: float) -> dict:
+    had_session = self.meshcore is not None and self.meshcore.is_connected
+    if had_session:
+        log("Closing persistent MeshCore session before meshcli fallback to avoid serial-port contention")
+        await self.close()
+
+    try:
+        return await self.run_meshcli_json(*args, timeout=timeout)
+    finally:
+        if had_session:
+            try:
+                await self.connect(force_reconnect=True)
+            except Exception as e:
+                log(f"Reconnect after meshcli fallback failed: {e}")
+
+
+
+async def _patched_collect_neighbours(self) -> tuple[str, list[dict] | None, str | None, str]:
+    await self.connect()
+    contact = await self.ensure_contact(force_refresh=False)
+    fallback_node = get_contact_prefix(contact)
+    last_error_text = None
+
+    max_attempts = max(1, NEIGHBOURS_MAX_ATTEMPTS)
+
+    for attempt in range(1, max_attempts + 1):
+        direct_error = None
+
+        try:
+            contact = await self.ensure_contact(force_refresh=(attempt > 1))
+            rows, repeater_node = await self.collect_neighbours_via_meshcore(contact)
+            self.schedule_next_neighbours()
+            log(
+                f"Collected {len(rows)} neighbours via meshcore session for {REPEATER_NAME} ({repeater_node}) "
+                f"on attempt {attempt}/{max_attempts}"
+            )
+            return ("valid", rows, None, repeater_node)
+
+        except Exception as e:
+            direct_error = e
+            log(
+                f"Direct MeshCore neighbour collection failed on attempt {attempt}/{max_attempts}: "
+                f"{e}"
+            )
+
+        try:
+            for fallback_poll in range(1, 6):
+                payload = await self.run_meshcli_json_exclusive(
+                    "req_neighbours",
+                    REPEATER_NAME,
+                    timeout=NEIGHBOURS_TIMEOUT_SEC,
+                )
+
+                if (
+                    isinstance(payload, dict)
+                    and str(payload.get("error") or "").strip().lower() == "getting data"
+                ):
+                    if fallback_poll < 5:
+                        log(
+                            f"meshcli fallback returned 'Getting data' for {REPEATER_NAME}; "
+                            f"poll {fallback_poll}/5, waiting 3s"
+                        )
+                        await asyncio.sleep(3)
+                        continue
+                    raise RuntimeError("meshcli still reports 'Getting data' after 5 polls")
+
+                rows, repeater_node = self.build_neighbour_rows(payload, fallback_node)
+                self.schedule_next_neighbours()
+                log(
+                    f"Collected {len(rows)} neighbours via meshcli fallback for {REPEATER_NAME} ({repeater_node}) "
+                    f"on attempt {attempt}/{max_attempts}"
+                )
+                return ("valid", rows, None, repeater_node)
+
+        except Exception as fallback_error:
+            err_text = (
+                f"direct meshcore failed: {direct_error}; "
+                f"meshcli fallback failed: {fallback_error}"
+            )
+            err_kind = classify_neighbours_error(err_text)
+            last_error_text = shorten_error(err_text)
+            log(
+                f"collect_neighbours attempt {attempt}/{max_attempts} failed "
+                f"[{err_kind}]: {err_text}"
+            )
+
+        if attempt >= max_attempts:
+            break
+
+        delay = neighbour_retry_delay()
+        log(f"Retrying neighbour collection in {delay:.1f}s")
+        await asyncio.sleep(delay)
+
+    self.schedule_next_neighbours()
+    return ("error", None, last_error_text, fallback_node)
+
+
+def _apply_neighbour_stability_patch() -> None:
+    MeshStatusSession.build_neighbour_rows = _patched_build_neighbour_rows
+    MeshStatusSession.collect_neighbours_via_meshcore = _patched_collect_neighbours_via_meshcore
+    MeshStatusSession.run_meshcli_json = _patched_run_meshcli_json
+    MeshStatusSession.run_meshcli_json_exclusive = _patched_run_meshcli_json_exclusive
+    MeshStatusSession.collect_neighbours = _patched_collect_neighbours
+
+
+_apply_neighbour_stability_patch()
+
 async def run_poll(session: MeshStatusSession, next_poll_at: str | None) -> None:
     started_ts = now_str()
     safe_update_meta(
