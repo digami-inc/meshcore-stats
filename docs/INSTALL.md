@@ -49,14 +49,17 @@ It has three main parts:
 
 sudo apt update
 sudo apt install -y git python3 python3-venv
+
 2. Clone the repository
 git clone <YOUR_REPO_URL>
 cd meshcore-stats
+
 3. Create a virtual environment
 python3 -m venv .venv
 . .venv/bin/activate
 python3 -m pip install --upgrade pip
 python3 -m pip install -r requirements.txt
+
 4. Create the database schema
 mysql -u <DB_USER> -p <DB_NAME> < sql/001_repeater_status_schema.sql
 
