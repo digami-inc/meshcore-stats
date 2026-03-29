@@ -127,6 +127,41 @@ HTML = r"""
       line-height: 1.15;
     }
 
+    .value-row {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+    }
+
+    .trend-arrow {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 18px;
+      font-size: 22px;
+      font-weight: 700;
+      line-height: 1;
+      color: var(--muted);
+    }
+
+    .trend-arrow.up {
+      color: var(--good);
+    }
+
+    .trend-arrow.down {
+      color: var(--bad);
+    }
+
+    .trend-arrow.neutral {
+      color: var(--muted);
+      opacity: .45;
+    }
+
+    .trend-arrow.hidden {
+      visibility: hidden;
+    }
+
     .meta {
       font-size: 11px;
       color: var(--muted);
@@ -401,7 +436,10 @@ HTML = r"""
   <div class="cards">
     <div class="card status-gray" id="battery-card">
       <div class="label" id="battery-label">Battery</div>
-      <div class="value" id="battery">--</div>
+      <div class="value-row">
+        <div class="value" id="battery">--</div>
+        <div class="trend-arrow hidden neutral" id="battery-trend-arrow">↑</div>
+      </div>
       <div class="meta" id="battery-meta">24h trend: --</div>
       <div class="statusline">
         <span id="battery-dot" class="dot gray"></span>
@@ -530,6 +568,7 @@ let latestNeighbours = [];
 let latestNeighboursCollectedTs = null;
 
 let battery24hDeltaV = null;
+let latestBatteryTrendDirection = null;
 let noiseFloorBaselineDbm = null;
 let linkMarginBaselineDb = null;
 let snrBaselineDb = null;
@@ -771,6 +810,7 @@ function renderBatteryDisplay() {
   const volts = batteryMvToVolts(latestBatteryMv);
   if (volts == null || isNaN(volts)) {
     el.textContent = '--';
+    renderBatteryTrendArrow();
     return;
   }
 
@@ -780,6 +820,36 @@ function renderBatteryDisplay() {
   } else {
     el.textContent = `${volts.toFixed(3)} V`;
   }
+
+  renderBatteryTrendArrow();
+}
+
+function renderBatteryTrendArrow() {
+  const el = document.getElementById('battery-trend-arrow');
+  if (!el) return;
+
+  el.className = 'trend-arrow';
+
+  if (batteryDisplayMode !== 'v') {
+    el.classList.add('hidden', 'neutral');
+    el.textContent = '↑';
+    return;
+  }
+
+  if (latestBatteryTrendDirection === 'up') {
+    el.classList.add('up');
+    el.textContent = '↑';
+    return;
+  }
+
+  if (latestBatteryTrendDirection === 'down') {
+    el.classList.add('down');
+    el.textContent = '↓';
+    return;
+  }
+
+  el.classList.add('hidden', 'neutral');
+  el.textContent = '↑';
 }
 
 function renderBatteryMeta() {
@@ -1325,6 +1395,7 @@ async function loadLatest() {
   const fetchedUptimeSecs = d.uptime_secs == null ? null : Number(d.uptime_secs);
 
   latestBatteryMv = fetchedBatteryMv;
+  latestBatteryTrendDirection = d.battery_trend_direction || null;
   latestNoiseFloorDbm = d.noise_floor_dbm == null ? null : Number(d.noise_floor_dbm);
   latestRssiDbm = d.last_rssi_dbm == null ? null : Number(d.last_rssi_dbm);
   latestSnrDb = d.last_snr_db == null ? null : Number(d.last_snr_db);
@@ -1526,6 +1597,21 @@ def api_latest():
             cur.execute(
                 """
                 SELECT
+                    ts,
+                    bat_mv
+                FROM repeater_status_history
+                WHERE node = %s
+                  AND bat_mv IS NOT NULL
+                ORDER BY ts DESC, id DESC
+                LIMIT 3
+                """,
+                (NODE,),
+            )
+            battery_recent_rows = cur.fetchall()
+
+            cur.execute(
+                """
+                SELECT
                     noise_floor_dbm,
                     last_rssi_dbm,
                     last_snr_db
@@ -1632,6 +1718,22 @@ def api_latest():
         if r.get("bat_mv") is not None
     ]
     row["battery_24h_delta_v"] = round(battery_vals[-1] - battery_vals[0], 3) if len(battery_vals) >= 2 else None
+
+    row["battery_trend_direction"] = None
+    if len(battery_recent_rows) >= 3:
+        current_mv = battery_recent_rows[0].get("bat_mv")
+        prev1_mv = battery_recent_rows[1].get("bat_mv")
+        prev2_mv = battery_recent_rows[2].get("bat_mv")
+
+        if current_mv is not None and prev1_mv is not None and prev2_mv is not None:
+            current_mv = int(current_mv)
+            prev1_mv = int(prev1_mv)
+            prev2_mv = int(prev2_mv)
+
+            if current_mv > prev1_mv and current_mv > prev2_mv:
+                row["battery_trend_direction"] = "up"
+            elif current_mv < prev1_mv and current_mv < prev2_mv:
+                row["battery_trend_direction"] = "down"
 
     noise_vals = []
     margin_vals = []
