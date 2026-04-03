@@ -1,0 +1,16 @@
+[Unit]
+Description=Repeater status ingest multi-target loop
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=/etc/repeater-status-ingest/repeater-status-ingest-multi.env
+Type=simple
+User=al
+WorkingDirectory=/home/al/meshcore-stats
+ExecStart=/home/al/venvs/repeater-status/bin/python /home/al/meshcore-stats/collector/app/repeater_status_ingest_multi.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

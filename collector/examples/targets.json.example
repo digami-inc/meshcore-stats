@@ -1,0 +1,18 @@
+[
+  {
+    "name": "Inciema Tornis",
+    "pubkey": "1385fef9d37e5172d34b8d98b9bffb1e4ae5a6ba1e9436ab234b59d1035b1d6d",
+    "node": "1385fef9d37e",
+    "password": "",
+    "login_mode": "always",
+    "enabled": true
+  },
+  {
+    "name": "StraupesPils",
+    "pubkey": "8aee80843dec84966dd35e9f53a36686429aa76b1a6204927d59e462e824124f",
+    "node": "8aee80843dec",
+    "password": "",
+    "login_mode": "never",
+    "enabled": true
+  }
+]
