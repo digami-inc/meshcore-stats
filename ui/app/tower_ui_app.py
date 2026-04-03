@@ -11,17 +11,60 @@ DB_PORT = int(os.getenv("DB_PORT", "3306"))
 DB_NAME = os.getenv("DB_NAME", "repeater_status")
 DB_USER = os.getenv("DB_USER", "repeater_reader")
 DB_PASS = os.getenv("DB_PASS", "")
-NODE = os.getenv("NODE", "1385fef9d37e")
+DEFAULT_NODE = os.getenv("NODE", "1385fef9d37e")
+REPEATER_OPTIONS = os.getenv(
+    "REPEATER_OPTIONS",
+    "1385fef9d37e:Inciema Tornis:repeater_status,8aee80843dec:Straupes Pils:repeater_status_lab",
+)
 
 app = Flask(__name__)
 
+
+def parse_repeater_options(raw: str) -> list[dict]:
+    out: list[dict] = []
+    seen: set[str] = set()
+
+    for chunk in (raw or "").split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+
+        parts = [part.strip() for part in chunk.split(":", 2)]
+        node = (parts[0] if len(parts) >= 1 else "").lower()
+        name = (parts[1] if len(parts) >= 2 and parts[1] else node)
+        db_name = (parts[2] if len(parts) >= 3 and parts[2] else DB_NAME)
+
+        if not node or node in seen:
+            continue
+
+        seen.add(node)
+        out.append({"node": node, "name": name, "db_name": db_name})
+
+    if not out:
+        out.append({"node": DEFAULT_NODE.lower(), "name": DEFAULT_NODE.lower(), "db_name": DB_NAME})
+    return out
+
+REPEATERS = parse_repeater_options(REPEATER_OPTIONS)
+REPEATER_MAP = {item["node"]: item for item in REPEATERS}
+
+
+def get_requested_node() -> str:
+    requested = (request.args.get("node") or DEFAULT_NODE).strip().lower()
+    if requested in REPEATER_MAP:
+        return requested
+    return DEFAULT_NODE.lower()
+
+
+def get_requested_repeater() -> dict:
+    node = get_requested_node()
+    return REPEATER_MAP.get(node) or REPEATERS[0]
 HTML = r"""
 <!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Inciems Tower Repeater Telemetry</title>
+  <title>Repeater Telemetry Dashboard</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <style>
     :root {
@@ -73,6 +116,80 @@ HTML = r"""
       color: var(--muted);
       font-size: 13px;
     }
+
+    .repeater-switcher {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      margin: 0 auto 14px auto;
+      max-width: 760px;
+    }
+
+    .repeater-tile {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px 14px;
+      border-radius: 14px;
+      background: linear-gradient(180deg, rgba(30,41,59,.78), rgba(23,34,53,.86));
+      border: 1px solid rgba(148,163,184,.12);
+      box-shadow: 0 8px 22px rgba(0,0,0,.16);
+      cursor: pointer;
+      transition: transform .16s ease, box-shadow .16s ease, border-color .16s ease, background .16s ease;
+    }
+
+    .repeater-tile:hover {
+      transform: translateY(-1px);
+      border-color: rgba(96,165,250,.35);
+      box-shadow: 0 10px 24px rgba(0,0,0,.22);
+    }
+
+    .repeater-tile.active {
+      border-color: rgba(96,165,250,.72);
+      background: linear-gradient(180deg, rgba(37,99,235,.22), rgba(23,34,53,.96));
+      box-shadow: 0 12px 28px rgba(37,99,235,.18);
+    }
+
+    .repeater-tile-main {
+      min-width: 0;
+    }
+
+    .repeater-tile-name {
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .repeater-tile-sub {
+      margin-top: 3px;
+      font-size: 10px;
+      color: var(--muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .repeater-tile-sub:empty {
+      display: none;
+    }
+
+    .repeater-battery-dot {
+      width: 11px;
+      height: 11px;
+      border-radius: 50%;
+      background: var(--gray);
+      box-shadow: 0 0 10px rgba(255,255,255,.10);
+      flex: 0 0 auto;
+    }
+
+    .repeater-battery-dot.green { background: var(--good); }
+    .repeater-battery-dot.yellow { background: var(--warn); }
+    .repeater-battery-dot.red { background: var(--bad); }
+    .repeater-battery-dot.gray { background: var(--gray); }
 
     .cards {
       display: grid;
@@ -431,6 +548,10 @@ HTML = r"""
       .neighbors-list { grid-template-columns: 1fr; }
     }
 
+    @media (max-width: 760px) {
+      .repeater-switcher { grid-template-columns: 1fr; }
+    }
+
     @media (max-width: 620px) {
       body { padding: 10px; }
       h1 { font-size: 26px; }
@@ -444,8 +565,18 @@ HTML = r"""
 <body>
 <div class="wrap">
   <div class="page-head">
-    <h1>Inciems Tower Repeater Telemetry</h1>
+    <h1>Repeater Telemetry Dashboard</h1>
     <p class="lead">Live repeater health, RF environment, and link quality.</p>
+  </div>
+
+  <div class="repeater-switcher" id="repeater-switcher">
+    <div class="repeater-tile active">
+      <div class="repeater-tile-main">
+        <div class="repeater-tile-name">Loading…</div>
+        <div class="repeater-tile-sub">Please wait</div>
+      </div>
+      <span class="repeater-battery-dot gray"></span>
+    </div>
   </div>
 
   <div class="cards">
@@ -480,7 +611,7 @@ HTML = r"""
     </div>
 
     <div class="card status-gray" id="margin-card">
-      <div class="label">Link Margin</div>
+      <div class="label">Poll Link</div>
       <div class="value" id="link-margin">--</div>
       <div class="meta" id="link-meta">RSSI -- | SNR --</div>
       <div class="statusline">
@@ -539,7 +670,7 @@ HTML = r"""
 
   <div class="chartbox">
     <div class="chart-head">
-      <h2 id="margin-chart-title">Link Margin — week</h2>
+      <h2 id="margin-chart-title">Poll Link — week</h2>
       <div class="chart-meta" id="margin-chart-meta">--</div>
     </div>
     <canvas id="marginChart" height="120"></canvas>
@@ -560,6 +691,9 @@ let batteryChart;
 let noiseChart;
 let marginChart;
 let snrChart;
+
+let repeaters = [];
+let currentNode = localStorage.getItem('selectedRepeaterNode') || null;
 
 let serverTimeMs = null;
 let lastRecordTs = null;
@@ -624,6 +758,28 @@ Chart.register(thresholdBandsPlugin);
 
 function fmtDateTime(s) {
   return s || '--';
+}
+
+function apiUrl(path, extraParams = {}, includeNode = true) {
+  const url = new URL(path, window.location.origin);
+  if (includeNode && currentNode) {
+    url.searchParams.set('node', currentNode);
+  }
+  for (const [key, value] of Object.entries(extraParams || {})) {
+    if (value !== undefined && value !== null && value !== '') {
+      url.searchParams.set(key, value);
+    }
+  }
+  return `${url.pathname}${url.search}`;
+}
+
+function setCurrentNode(node, persist = true) {
+  if (!node) return;
+  currentNode = node;
+  if (persist) {
+    localStorage.setItem('selectedRepeaterNode', currentNode);
+  }
+  renderRepeaterSwitcher();
 }
 
 function pad2(n) {
@@ -785,6 +941,67 @@ function formatAgoShort(totalSec) {
   if (days > 0) return `${days}d ${hours}h`;
   if (hours > 0) return `${hours}h ${minutes}m`;
   return `${minutes}m`;
+}
+
+function renderRepeaterSwitcher() {
+  const el = document.getElementById('repeater-switcher');
+  if (!el) return;
+
+  if (!Array.isArray(repeaters) || !repeaters.length) {
+    el.innerHTML = `
+      <div class="repeater-tile active">
+        <div class="repeater-tile-main">
+          <div class="repeater-tile-name">Loading…</div>
+        </div>
+        <span class="repeater-battery-dot gray"></span>
+      </div>
+    `;
+    return;
+  }
+
+  el.innerHTML = repeaters.map((item) => {
+    const active = item.node === currentNode ? ' active' : '';
+    const dot = item.battery_state || 'gray';
+    return `
+      <div class="repeater-tile${active}" data-node="${escapeHtml(item.node)}">
+        <div class="repeater-tile-main">
+          <div class="repeater-tile-name">${escapeHtml(item.name || item.node)}</div>
+          <div class="repeater-tile-sub"></div>
+        </div>
+        <span class="repeater-battery-dot ${escapeHtml(dot)}"></span>
+      </div>
+    `;
+  }).join('');
+
+  el.querySelectorAll('.repeater-tile[data-node]').forEach((tile) => {
+    tile.addEventListener('click', async () => {
+      const node = tile.dataset.node;
+      if (!node || node === currentNode) return;
+      setCurrentNode(node);
+      await loadLatest();
+      await refreshHistory();
+      await syncServerTime();
+      await loadRepeaterSummaries();
+    });
+  });
+}
+
+async function loadRepeaterSummaries() {
+  const r = await fetch('/api/repeaters_summary');
+  const d = await r.json();
+
+  repeaters = Array.isArray(d.repeaters) ? d.repeaters : [];
+  const validNodes = new Set(repeaters.map((x) => x.node));
+  const defaultNode = d.default_node || (repeaters[0] && repeaters[0].node) || null;
+
+  if (!currentNode || !validNodes.has(currentNode)) {
+    currentNode = validNodes.has(defaultNode) ? defaultNode : (repeaters[0] ? repeaters[0].node : null);
+    if (currentNode) {
+      localStorage.setItem('selectedRepeaterNode', currentNode);
+    }
+  }
+
+  renderRepeaterSwitcher();
 }
 
 function renderNeighboursPanel() {
@@ -1128,7 +1345,7 @@ function updateRangeTitles() {
   const label = rangeLabel(currentRange);
   document.getElementById('battery-chart-title').textContent = `Battery — ${label}`;
   document.getElementById('noise-chart-title').textContent = `Noise Floor — ${label}`;
-  document.getElementById('margin-chart-title').textContent = `Link Margin — ${label}`;
+  document.getElementById('margin-chart-title').textContent = `Poll Link — ${label}`;
   document.getElementById('snr-chart-title').textContent = `Last SNR — ${label}`;
 }
 
@@ -1319,7 +1536,7 @@ function updateSnrChartMeta(snrSeries) {
 }
 
 async function refreshHistory() {
-  const r = await fetch(`/api/history?range=${currentRange}`);
+  const r = await fetch(apiUrl('/api/history', { range: currentRange }));
   const data = await r.json();
 
   const labels = data.map(x => x.ts);
@@ -1415,7 +1632,7 @@ async function refreshHistory() {
 }
 
 async function loadLatest() {
-  const r = await fetch('/api/latest');
+  const r = await fetch(apiUrl('/api/latest'));
   const d = await r.json();
 
   const fetchedRecordTs = parseLocalTs(d.ts);
@@ -1494,11 +1711,13 @@ async function loadLatest() {
 (async function init() {
   initBatteryModeToggle();
   initRangeSelector();
+  await loadRepeaterSummaries();
   await loadLatest();
   await refreshHistory();
   await syncServerTime();
   setInterval(updateServerClock, 1000);
   setInterval(syncServerTime, 60000);
+  setInterval(loadRepeaterSummaries, 30000);
   setInterval(loadLatest, 5000);
   setInterval(refreshHistory, 60000);
 })();
@@ -1507,13 +1726,13 @@ async function loadLatest() {
 </html>
 """
 
-def db():
+def db(database_name: str | None = None):
     return pymysql.connect(
         host=DB_HOST,
         port=DB_PORT,
         user=DB_USER,
         password=DB_PASS,
-        database=DB_NAME,
+        database=database_name or DB_NAME,
         charset="utf8mb4",
         cursorclass=pymysql.cursors.DictCursor,
         autocommit=True,
@@ -1527,13 +1746,83 @@ def index():
 def api_now():
     return jsonify({"now": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
 
+
+@app.route("/api/repeaters")
+def api_repeaters():
+    return jsonify(
+        {
+            "default_node": DEFAULT_NODE.lower(),
+            "repeaters": REPEATERS,
+        }
+    )
+
+
+def battery_state_from_mv(bat_mv: int | None) -> str:
+    if bat_mv is None:
+        return "gray"
+    volts = float(bat_mv) / 1000.0
+    if volts >= 3.70:
+        return "green"
+    if volts >= 3.40:
+        return "yellow"
+    return "red"
+
+
+@app.route("/api/repeaters_summary")
+def api_repeaters_summary():
+    out = []
+
+    for repeater in REPEATERS:
+        conn = db(repeater["db_name"])
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        ts,
+                        bat_mv
+                    FROM repeater_status_history
+                    WHERE node = %s
+                    ORDER BY ts DESC, id DESC
+                    LIMIT 1
+                    """,
+                    (repeater["node"],),
+                )
+                row = cur.fetchone() or {}
+        finally:
+            conn.close()
+
+        ts = row.get("ts")
+        bat_mv = row.get("bat_mv")
+
+        out.append(
+            {
+                "node": repeater["node"],
+                "name": repeater["name"],
+                "db_name": repeater["db_name"],
+                "ts": ts.strftime("%Y-%m-%d %H:%M:%S") if ts else None,
+                "bat_mv": int(bat_mv) if bat_mv is not None else None,
+                "battery_state": battery_state_from_mv(int(bat_mv)) if bat_mv is not None else "gray",
+            }
+        )
+
+    return jsonify(
+        {
+            "default_node": DEFAULT_NODE.lower(),
+            "repeaters": out,
+        }
+    )
+
+
 @app.route("/api/latest")
 def api_latest():
+    repeater = get_requested_repeater()
+    node = repeater["node"]
     now = datetime.now()
     since_24h = now - timedelta(hours=24)
     since_30d = now - timedelta(days=30)
 
-    conn = db()
+    conn = db(repeater["db_name"])
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -1556,7 +1845,7 @@ def api_latest():
                 ORDER BY ts DESC, id DESC
                 LIMIT 1
                 """,
-                (NODE,),
+                (node,),
             )
             row = cur.fetchone() or {}
 
@@ -1573,7 +1862,7 @@ def api_latest():
                 WHERE node = %s
                 LIMIT 1
                 """,
-                (NODE,),
+                (node,),
             )
             meta_row = cur.fetchone() or {}
 
@@ -1591,7 +1880,7 @@ def api_latest():
                 ORDER BY ts_started DESC, id DESC
                 LIMIT 1
                 """,
-                (NODE,),
+                (node,),
             )
             last_poll_row = cur.fetchone() or {}
 
@@ -1604,7 +1893,7 @@ def api_latest():
                 WHERE node = %s
                   AND ts_started >= %s
                 """,
-                (NODE, since_24h.strftime("%Y-%m-%d %H:%M:%S")),
+                (node, since_24h.strftime("%Y-%m-%d %H:%M:%S")),
             )
             poll_stats_row = cur.fetchone() or {}
 
@@ -1619,7 +1908,7 @@ def api_latest():
                   AND bat_mv IS NOT NULL
                 ORDER BY ts ASC, id ASC
                 """,
-                (NODE, since_24h.strftime("%Y-%m-%d %H:%M:%S")),
+                (node, since_24h.strftime("%Y-%m-%d %H:%M:%S")),
             )
             battery_rows = cur.fetchall()
 
@@ -1634,7 +1923,7 @@ def api_latest():
                 ORDER BY ts DESC, id DESC
                 LIMIT 3
                 """,
-                (NODE,),
+                (node,),
             )
             battery_recent_rows = cur.fetchall()
 
@@ -1649,7 +1938,7 @@ def api_latest():
                   AND ts >= %s
                 ORDER BY ts ASC, id ASC
                 """,
-                (NODE, since_30d.strftime("%Y-%m-%d %H:%M:%S")),
+                (node, since_30d.strftime("%Y-%m-%d %H:%M:%S")),
             )
             stats_rows = cur.fetchall()
 
@@ -1657,7 +1946,7 @@ def api_latest():
             neighbour_rows = []
 
             try:
-                node_for_neighbours = row.get("node") or NODE
+                node_for_neighbours = row.get("node") or node
 
                 cur.execute(
                     """
@@ -1792,11 +2081,13 @@ def api_latest():
 
 @app.route("/api/history")
 def api_history():
+    repeater = get_requested_repeater()
+    node = repeater["node"]
     range_name = request.args.get("range", "week")
     days = {"day": 1, "week": 7, "month": 30, "year": 365}.get(range_name, 7)
     since = datetime.now() - timedelta(days=days)
 
-    conn = db()
+    conn = db(repeater["db_name"])
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -1812,7 +2103,7 @@ def api_history():
                   AND ts >= %s
                 ORDER BY ts ASC, id ASC
                 """,
-                (NODE, since.strftime("%Y-%m-%d %H:%M:%S")),
+                (node, since.strftime("%Y-%m-%d %H:%M:%S")),
             )
             rows = cur.fetchall()
     finally:
