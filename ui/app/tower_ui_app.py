@@ -14,7 +14,7 @@ DB_PASS = os.getenv("DB_PASS", "")
 DEFAULT_NODE = os.getenv("NODE", "1385fef9d37e")
 REPEATER_OPTIONS = os.getenv(
     "REPEATER_OPTIONS",
-    "1385fef9d37e:Inciema Tornis:repeater_status,8aee80843dec:Straupes Pils:repeater_status_lab",
+    "1385fef9d37e:Inciema Tornis:repeater_status,8aee80843dec:Straupes Pils:repeater_status",
 )
 
 app = Flask(__name__)
