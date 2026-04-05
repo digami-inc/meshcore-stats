@@ -20,6 +20,9 @@ MESHCLI_BIN = os.getenv("MESHCLI_BIN", "/home/al/.local/bin/meshcli")
 STATUS_TIMEOUT_SEC = float(os.getenv("STATUS_TIMEOUT_SEC", "25"))
 CONNECT_TIMEOUT_SEC = float(os.getenv("CONNECT_TIMEOUT_SEC", "20"))
 CONTACT_REFRESH_SEC = int(os.getenv("CONTACT_REFRESH_SEC", "900"))
+CONTACT_SNAPSHOT_INTERVAL_SEC = int(os.getenv("CONTACT_SNAPSHOT_INTERVAL_SEC", "21600"))
+CONTACT_PRUNE_MAX_AGE_DAYS = int(os.getenv("CONTACT_PRUNE_MAX_AGE_DAYS", "14"))
+CONTACT_SOURCE_ID = os.getenv("CONTACT_SOURCE_ID", SERIAL_PORT)
 NEIGHBOURS_INTERVAL_SEC = int(os.getenv("NEIGHBOURS_INTERVAL_SEC", "3600"))
 NEIGHBOURS_JITTER_SEC = int(os.getenv("NEIGHBOURS_JITTER_SEC", "900"))
 NEIGHBOURS_TIMEOUT_SEC = float(os.getenv("NEIGHBOURS_TIMEOUT_SEC", "25"))
@@ -84,7 +87,18 @@ def to_hex_path(value: Any) -> str | None:
     return str(value)
 
 
+def unwrap_contact(contact: Any) -> dict | None:
+    if isinstance(contact, dict):
+        return contact
+    if isinstance(contact, tuple) and contact:
+        first = contact[0]
+        if isinstance(first, dict):
+            return first
+    return None
+
+
 def get_contact_pubkey(contact: dict | None) -> str | None:
+    contact = unwrap_contact(contact)
     if not contact:
         return None
     for key in ("public_key", "pubkey", "key"):
@@ -104,6 +118,7 @@ def get_contact_prefix(contact: dict | None) -> str:
 
 
 def get_contact_name(contact: dict | None) -> str | None:
+    contact = unwrap_contact(contact)
     if not contact:
         return None
     for key in ("adv_name", "name"):
@@ -111,6 +126,32 @@ def get_contact_name(contact: dict | None) -> str | None:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return None
+
+
+def get_contact_type(contact: dict | None) -> int | None:
+    contact = unwrap_contact(contact)
+    if not contact:
+        return None
+
+    raw = contact.get("type")
+    if isinstance(raw, bool):
+        return int(raw)
+    if isinstance(raw, (int, float)):
+        return int(raw)
+    if isinstance(raw, str) and raw.strip():
+        try:
+            return int(raw.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def is_repeater_contact(contact: dict | None) -> bool:
+    return get_contact_type(contact) == 2
+
+
+def normalize_contact_name(value: str | None) -> str:
+    return " ".join((value or "").strip().lower().split())
 
 
 def find_contact_for_target(meshcore: MeshCore, target: dict) -> dict | None:
@@ -122,12 +163,12 @@ def find_contact_for_target(meshcore: MeshCore, target: dict) -> dict | None:
         for item in contacts.values():
             contact_pubkey = (get_contact_pubkey(item) or "").strip().lower()
             if wanted_pubkey and contact_pubkey == wanted_pubkey:
-                return item
+                return unwrap_contact(item)
 
         for item in contacts.values():
             contact_name = get_contact_name(item)
             if wanted_name and contact_name == wanted_name:
-                return item
+                return unwrap_contact(item)
 
     if wanted_name:
         try:
@@ -147,6 +188,7 @@ def extract_json(text: str) -> dict:
 
 
 def describe_contact_route(contact: dict | None) -> str:
+    contact = unwrap_contact(contact)
     if not contact:
         return "route=unknown"
     parts: list[str] = []
@@ -414,6 +456,95 @@ def db_insert_neighbour_records(collected_ts: str, repeater_node: str, rows: lis
     finally:
         conn.close()
 
+
+
+def db_get_last_repeater_contact_snapshot_ts(source_id: str) -> datetime | None:
+    conn = db_connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT MAX(last_seen_ts)
+                FROM repeater_contact_current
+                WHERE source_id = %s
+                """,
+                (source_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            return row[0]
+    finally:
+        conn.close()
+
+
+def repeater_contact_snapshot_due(source_id: str, min_interval_sec: int) -> bool:
+    last_seen_ts = db_get_last_repeater_contact_snapshot_ts(source_id)
+    if last_seen_ts is None:
+        return True
+    age_sec = (datetime.now() - last_seen_ts).total_seconds()
+    return age_sec >= max(0, min_interval_sec)
+
+
+def db_upsert_repeater_contacts(source_id: str, collected_ts: str, rows: list[dict]) -> None:
+    if not rows:
+        return
+
+    conn = db_connect()
+    try:
+        with conn.cursor() as cur:
+            cur.executemany(
+                """
+                INSERT INTO repeater_contact_current (
+                    source_id,
+                    contact_name,
+                    contact_name_norm,
+                    current_pubkey,
+                    current_pubkey_pre,
+                    first_byte,
+                    first_seen_ts,
+                    last_seen_ts
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    contact_name = VALUES(contact_name),
+                    current_pubkey = VALUES(current_pubkey),
+                    current_pubkey_pre = VALUES(current_pubkey_pre),
+                    first_byte = VALUES(first_byte),
+                    last_seen_ts = VALUES(last_seen_ts)
+                """,
+                [
+                    (
+                        source_id,
+                        row["contact_name"],
+                        row["contact_name_norm"],
+                        row["current_pubkey"],
+                        row["current_pubkey_pre"],
+                        row["first_byte"],
+                        collected_ts,
+                        collected_ts,
+                    )
+                    for row in rows
+                ],
+            )
+    finally:
+        conn.close()
+
+
+def db_prune_stale_repeater_contacts(source_id: str, cutoff_ts: str) -> None:
+    conn = db_connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                DELETE FROM repeater_contact_current
+                WHERE source_id = %s
+                  AND last_seen_ts < %s
+                """,
+                (source_id, cutoff_ts),
+            )
+    finally:
+        conn.close()
+
 def db_upsert_meta(
     node: str,
     poll_state: str,
@@ -624,6 +755,49 @@ def save_neighbour_records(repeater_node: str, rows: list[dict]) -> None:
         log(f"Neighbour insert failed: {e}")
 
 
+
+
+def save_repeater_contacts(source_id: str, contacts_payload: dict) -> None:
+    if not isinstance(contacts_payload, dict) or not contacts_payload:
+        return
+
+    try:
+        if not repeater_contact_snapshot_due(source_id, CONTACT_SNAPSHOT_INTERVAL_SEC):
+            return
+
+        collected_ts = now_str()
+        cutoff_ts = fmt_ts(datetime.now() - timedelta(days=max(1, CONTACT_PRUNE_MAX_AGE_DAYS)))
+        rows: list[dict] = []
+
+        for item in contacts_payload.values():
+            contact = unwrap_contact(item)
+            if not contact or not is_repeater_contact(contact):
+                continue
+
+            contact_name = get_contact_name(contact)
+            contact_pubkey = get_contact_pubkey(contact)
+            contact_name_norm = normalize_contact_name(contact_name)
+            if not contact_name_norm or not contact_pubkey:
+                continue
+
+            contact_pubkey = contact_pubkey.lower()
+            rows.append(
+                {
+                    "contact_name": contact_name or contact_name_norm,
+                    "contact_name_norm": contact_name_norm,
+                    "current_pubkey": contact_pubkey,
+                    "current_pubkey_pre": contact_pubkey[:12],
+                    "first_byte": contact_pubkey[:2],
+                }
+            )
+
+        db_upsert_repeater_contacts(source_id, collected_ts, rows)
+        db_prune_stale_repeater_contacts(source_id, cutoff_ts)
+        log(f"Updated repeater contact snapshot: {len(rows)} repeaters for source={source_id}")
+    except Exception as e:
+        log(f"Repeater contact snapshot update failed: {e}")
+
+
 class MeshStatusSession:
     def __init__(self, target: dict) -> None:
         self.target = target
@@ -639,6 +813,7 @@ class MeshStatusSession:
         self.last_login_ts = 0.0
         self.consecutive_failures = 0
         self.login_events: asyncio.Queue[tuple[str, dict]] = asyncio.Queue()
+        self.contacts_payload: dict[str, dict] = {}
         self.next_neighbours_due_ts = 0.0
         self.login_success_sub = None
         self.login_failed_sub = None
@@ -652,6 +827,7 @@ class MeshStatusSession:
             self.meshcore = None
         self.contact = None
         self.contact_prefix_map = []
+        self.contacts_payload = {}
         self.last_contact_refresh = 0.0
         self.login_success_sub = None
         self.login_failed_sub = None
@@ -699,12 +875,14 @@ class MeshStatusSession:
             if result.type == EventType.ERROR:
                 raise RuntimeError(f"get_contacts failed: {result.payload}")
             payload = getattr(result, "payload", {}) or {}
+            self.contacts_payload = payload if isinstance(payload, dict) else {}
             self.contact_prefix_map = []
-            for item in payload.values():
+            for item in self.contacts_payload.values():
                 pubkey = get_contact_pubkey(item)
                 name = get_contact_name(item)
                 if pubkey and name:
                     self.contact_prefix_map.append((pubkey.lower(), name))
+            save_repeater_contacts(CONTACT_SOURCE_ID, self.contacts_payload)
             self.last_contact_refresh = now
 
         self.contact = find_contact_for_target(self.meshcore, self.target)
