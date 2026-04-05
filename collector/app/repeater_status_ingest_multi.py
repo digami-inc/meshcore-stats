@@ -545,6 +545,94 @@ def db_prune_stale_repeater_contacts(source_id: str, cutoff_ts: str) -> None:
     finally:
         conn.close()
 
+
+def db_get_last_meshcore_contact_snapshot_ts(source_id: str) -> datetime | None:
+    conn = db_connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT MAX(last_seen_ts)
+                FROM meshcore_contact_current
+                WHERE source_id = %s
+                """,
+                (source_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            return row[0]
+    finally:
+        conn.close()
+
+
+def meshcore_contact_snapshot_due(source_id: str, min_interval_sec: int) -> bool:
+    last_seen_ts = db_get_last_meshcore_contact_snapshot_ts(source_id)
+    if last_seen_ts is None:
+        return True
+    age_sec = (datetime.now() - last_seen_ts).total_seconds()
+    return age_sec >= max(0, min_interval_sec)
+
+
+def db_upsert_meshcore_contacts(source_id: str, collected_ts: str, rows: list[dict]) -> None:
+    if not rows:
+        return
+
+    conn = db_connect()
+    try:
+        with conn.cursor() as cur:
+            cur.executemany(
+                """
+                INSERT INTO meshcore_contact_current (
+                    source_id,
+                    contact_name,
+                    contact_name_norm,
+                    contact_type,
+                    current_pubkey,
+                    current_pubkey_pre,
+                    first_seen_ts,
+                    last_seen_ts
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    contact_name = VALUES(contact_name),
+                    contact_type = VALUES(contact_type),
+                    current_pubkey = VALUES(current_pubkey),
+                    current_pubkey_pre = VALUES(current_pubkey_pre),
+                    last_seen_ts = VALUES(last_seen_ts)
+                """,
+                [
+                    (
+                        source_id,
+                        row["contact_name"],
+                        row["contact_name_norm"],
+                        row["contact_type"],
+                        row["current_pubkey"],
+                        row["current_pubkey_pre"],
+                        collected_ts,
+                        collected_ts,
+                    )
+                    for row in rows
+                ],
+            )
+    finally:
+        conn.close()
+
+
+def db_prune_stale_meshcore_contacts(source_id: str, cutoff_ts: str) -> None:
+    conn = db_connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                DELETE FROM meshcore_contact_current
+                WHERE source_id = %s
+                  AND last_seen_ts < %s
+                """,
+                (source_id, cutoff_ts),
+            )
+    finally:
+        conn.close()
+
 def db_upsert_meta(
     node: str,
     poll_state: str,
@@ -757,6 +845,50 @@ def save_neighbour_records(repeater_node: str, rows: list[dict]) -> None:
 
 
 
+
+def save_meshcore_contacts(source_id: str, contacts_payload: dict) -> None:
+    if not isinstance(contacts_payload, dict) or not contacts_payload:
+        return
+
+    try:
+        if not meshcore_contact_snapshot_due(source_id, CONTACT_SNAPSHOT_INTERVAL_SEC):
+            return
+
+        collected_ts = now_str()
+        cutoff_ts = fmt_ts(datetime.now() - timedelta(days=max(1, CONTACT_PRUNE_MAX_AGE_DAYS)))
+        rows: list[dict] = []
+
+        for item in contacts_payload.values():
+            contact = unwrap_contact(item)
+            if not contact:
+                continue
+
+            contact_name = get_contact_name(contact)
+            contact_pubkey = get_contact_pubkey(contact)
+            contact_name_norm = normalize_contact_name(contact_name)
+            contact_type = get_contact_type(contact)
+
+            if not contact_name_norm or not contact_pubkey or contact_type is None:
+                continue
+
+            contact_pubkey = contact_pubkey.lower()
+            rows.append(
+                {
+                    "contact_name": contact_name or contact_name_norm,
+                    "contact_name_norm": contact_name_norm,
+                    "contact_type": int(contact_type),
+                    "current_pubkey": contact_pubkey,
+                    "current_pubkey_pre": contact_pubkey[:12],
+                }
+            )
+
+        db_upsert_meshcore_contacts(source_id, collected_ts, rows)
+        db_prune_stale_meshcore_contacts(source_id, cutoff_ts)
+        log(f"Updated meshcore contact snapshot: {len(rows)} contacts for source={source_id}")
+    except Exception as e:
+        log(f"Meshcore contact snapshot update failed: {e}")
+
+
 def save_repeater_contacts(source_id: str, contacts_payload: dict) -> None:
     if not isinstance(contacts_payload, dict) or not contacts_payload:
         return
@@ -883,6 +1015,7 @@ class MeshStatusSession:
                 if pubkey and name:
                     self.contact_prefix_map.append((pubkey.lower(), name))
             save_repeater_contacts(CONTACT_SOURCE_ID, self.contacts_payload)
+            save_meshcore_contacts(CONTACT_SOURCE_ID, self.contacts_payload)
             self.last_contact_refresh = now
 
         self.contact = find_contact_for_target(self.meshcore, self.target)
