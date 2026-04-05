@@ -531,6 +531,94 @@ HTML = r"""
       border: 1px solid rgba(96,165,250,.22);
     }
 
+    .contact-prefix-tool {
+      margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px solid rgba(148,163,184,.10);
+    }
+
+    .contact-prefix-tool-title {
+      font-size: 11px;
+      font-weight: 700;
+      margin-bottom: 6px;
+      color: var(--muted);
+    }
+
+    .contact-prefix-form {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .contact-prefix-input {
+      min-width: 160px;
+      max-width: 220px;
+      padding: 8px 10px;
+      border-radius: 10px;
+      border: 1px solid rgba(148,163,184,.16);
+      background: rgba(15,23,42,.55);
+      color: #e5eefc;
+      outline: none;
+    }
+
+    .contact-prefix-btn {
+      padding: 8px 12px;
+      border-radius: 10px;
+      border: 1px solid rgba(96,165,250,.20);
+      background: rgba(96,165,250,.14);
+      color: #dbeafe;
+      cursor: pointer;
+      font-weight: 700;
+    }
+
+    .contact-prefix-help {
+      font-size: 9px;
+      color: var(--muted);
+    }
+
+    .contact-prefix-results {
+      margin-top: 8px;
+      display: grid;
+      gap: 6px;
+    }
+
+    .contact-prefix-result {
+      background: rgba(15,23,42,.38);
+      border: 1px solid rgba(148,163,184,.08);
+      border-radius: 8px;
+      padding: 7px 8px;
+    }
+
+    .contact-prefix-result-name {
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .contact-prefix-result-meta {
+      margin-top: 3px;
+      font-size: 10px;
+      color: var(--muted);
+      word-break: break-word;
+    }
+
+    .contact-prefix-empty {
+      font-size: 10px;
+      color: var(--muted);
+    }
+
+    .contact-type-badge {
+      display: inline-block;
+      margin-left: 6px;
+      padding: 1px 6px;
+      border-radius: 999px;
+      font-size: 9px;
+      font-weight: 700;
+      background: rgba(148,163,184,.14);
+      color: #dbe5f2;
+      border: 1px solid rgba(148,163,184,.16);
+    }
+
     .neighbors-panel {
       background: linear-gradient(180deg, rgba(26,38,58,.96), rgba(18,28,44,.98));
       border-radius: 14px;
@@ -778,6 +866,18 @@ HTML = r"""
       <div class="collision-groups" id="collision-groups">
         <div class="neighbors-empty">No repeater first-byte collisions</div>
       </div>
+
+      <div class="contact-prefix-tool">
+        <div class="contact-prefix-tool-title">Find contacts by pubkey prefix</div>
+        <div class="contact-prefix-form">
+          <input id="contact-prefix-input" class="contact-prefix-input" type="text" maxlength="4" placeholder="8A or 8AEE">
+          <button id="contact-prefix-btn" class="contact-prefix-btn" type="button">Find</button>
+          <span class="contact-prefix-help">Enter 2 or 4 hex chars</span>
+        </div>
+        <div class="contact-prefix-results" id="contact-prefix-results">
+          <div class="contact-prefix-empty">No lookup yet</div>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -869,6 +969,9 @@ let latestNeighbours = [];
 let latestNeighboursCollectedTs = null;
 let latestRepeaterCollisionGroups = [];
 let latestRepeaterCollisionTs = null;
+let latestContactPrefixResults = [];
+let latestContactPrefixValue = "";
+let contactPrefixLookupTimer = null;
 
 let battery24hMinV = null;
 let battery24hMaxV = null;
@@ -1221,6 +1324,105 @@ function renderRepeaterCollisionPanel() {
         <div class="collision-list">${itemsHtml}</div>
       </div>`;
   }).join('');
+}
+
+function contactTypeLabel(v) {
+  if (Number(v) === 2) return 'repeater';
+  return 'contact';
+}
+
+function renderContactPrefixResults() {
+  const el = document.getElementById('contact-prefix-results');
+  if (!el) return;
+
+  const rows = Array.isArray(latestContactPrefixResults) ? latestContactPrefixResults : [];
+  if (!latestContactPrefixValue) {
+    el.innerHTML = '<div class="contact-prefix-empty">No lookup yet</div>';
+    return;
+  }
+  if (!rows.length) {
+    el.innerHTML = '<div class="contact-prefix-empty">No contacts found</div>';
+    return;
+  }
+
+  el.innerHTML = rows.map((row) => {
+    const name = escapeHtml(row.contact_name || row.current_pubkey_pre || 'unknown');
+    const pubkeyPre = escapeHtml(row.current_pubkey_pre || '--');
+    const fullPubkey = escapeHtml(row.current_pubkey || '--');
+    const typeLabel = escapeHtml(contactTypeLabel(row.contact_type));
+    const firstSeen = escapeHtml(row.first_seen_ts || '--');
+    const lastSeen = escapeHtml(row.last_seen_ts || '--');
+
+    return `
+      <div class="contact-prefix-result">
+        <div class="contact-prefix-result-name">${name}<span class="contact-type-badge">${typeLabel}</span></div>
+        <div class="contact-prefix-result-meta">${pubkeyPre} • ${fullPubkey}</div>
+        <div class="contact-prefix-result-meta">first seen ${firstSeen} • last seen ${lastSeen}</div>
+      </div>`;
+  }).join('');
+}
+
+async function runContactPrefixLookup() {
+  const input = document.getElementById('contact-prefix-input');
+  if (!input) return;
+
+  const raw = (input.value || '').trim();
+  const normalized = raw.toLowerCase().replace(/[^0-9a-f]/g, '');
+  latestContactPrefixValue = normalized;
+
+  const resultsEl = document.getElementById('contact-prefix-results');
+  if (resultsEl) {
+    resultsEl.innerHTML = '<div class="contact-prefix-empty">Looking up...</div>';
+  }
+
+  if (!(normalized.length === 2 || normalized.length === 4)) {
+    latestContactPrefixResults = [];
+    renderContactPrefixResults();
+    if (resultsEl) {
+      resultsEl.innerHTML = '<div class="contact-prefix-empty">Enter 2 or 4 hex chars</div>';
+    }
+    return;
+  }
+
+  try {
+    const resp = await fetch(`/api/contact_prefix_lookup?prefix=${encodeURIComponent(normalized)}`, { cache: 'no-store' });
+    const data = await resp.json();
+    latestContactPrefixResults = Array.isArray(data.results) ? data.results : [];
+    renderContactPrefixResults();
+  } catch (e) {
+    latestContactPrefixResults = [];
+    if (resultsEl) {
+      resultsEl.innerHTML = '<div class="contact-prefix-empty">Lookup failed</div>';
+    }
+  }
+}
+
+function initContactPrefixLookup() {
+  const input = document.getElementById('contact-prefix-input');
+  const btn = document.getElementById('contact-prefix-btn');
+  if (!input || !btn) return;
+
+  btn.addEventListener('click', runContactPrefixLookup);
+
+  input.addEventListener('input', () => {
+    if (contactPrefixLookupTimer) {
+      clearTimeout(contactPrefixLookupTimer);
+    }
+    contactPrefixLookupTimer = setTimeout(() => {
+      runContactPrefixLookup();
+    }, 350);
+  });
+
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (contactPrefixLookupTimer) {
+        clearTimeout(contactPrefixLookupTimer);
+        contactPrefixLookupTimer = null;
+      }
+      runContactPrefixLookup();
+    }
+  });
 }
 
 function renderBatteryDisplay() {
@@ -1945,6 +2147,7 @@ async function loadLatest() {
 (async function init() {
   initCollisionsToggle();
   initNeighboursToggle();
+  initContactPrefixLookup();
   initBatteryModeToggle();
   initRangeSelector();
   await loadRepeaterSummaries();
@@ -2048,6 +2251,57 @@ def api_repeaters_summary():
             "repeaters": out,
         }
     )
+
+
+@app.route("/api/contact_prefix_lookup")
+def api_contact_prefix_lookup():
+    raw_prefix = (request.args.get("prefix") or "").strip().lower()
+    prefix = "".join(ch for ch in raw_prefix if ch in "0123456789abcdef")
+
+    if len(prefix) not in (2, 4):
+        return jsonify({
+            "ok": False,
+            "error": "prefix must be 2 or 4 hex chars",
+            "prefix": raw_prefix,
+            "results": [],
+        }), 400
+
+    rows = []
+    conn = db(DB_NAME)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    contact_name,
+                    contact_type,
+                    current_pubkey_pre,
+                    current_pubkey,
+                    first_seen_ts,
+                    last_seen_ts
+                FROM meshcore_contact_current
+                WHERE current_pubkey LIKE %s
+                ORDER BY current_pubkey ASC, contact_name ASC
+                LIMIT 100
+                """,
+                (prefix + "%",),
+            )
+            rows = cur.fetchall() or []
+    finally:
+        conn.close()
+
+    for row in rows:
+        if row.get("first_seen_ts"):
+            row["first_seen_ts"] = row["first_seen_ts"].strftime("%Y-%m-%d %H:%M:%S")
+        if row.get("last_seen_ts"):
+            row["last_seen_ts"] = row["last_seen_ts"].strftime("%Y-%m-%d %H:%M:%S")
+
+    return jsonify({
+        "ok": True,
+        "prefix": prefix,
+        "count": len(rows),
+        "results": rows,
+    })
 
 
 @app.route("/api/latest")
