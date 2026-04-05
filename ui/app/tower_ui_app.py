@@ -403,6 +403,134 @@ HTML = r"""
       padding: 5px 9px;
     }
 
+    .collisions-panel {
+      background: linear-gradient(180deg, rgba(26,38,58,.96), rgba(18,28,44,.98));
+      border-radius: 14px;
+      padding: 10px 12px;
+      box-shadow: 0 8px 28px rgba(0,0,0,.20);
+      border: 1px solid rgba(148,163,184,.10);
+      margin-bottom: 14px;
+    }
+
+    .section-toggle {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 2px 0;
+      background: transparent;
+      border: 0;
+      color: inherit;
+      cursor: pointer;
+      text-align: left;
+    }
+
+    .section-toggle-left {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      min-width: 0;
+    }
+
+    .section-toggle-arrow {
+      font-size: 11px;
+      color: var(--muted);
+      line-height: 1;
+      transition: transform .18s ease;
+      flex: 0 0 auto;
+      opacity: .9;
+    }
+
+    .section-toggle[aria-expanded="false"] .section-toggle-arrow {
+      transform: rotate(-90deg);
+    }
+
+    .section-body {
+      margin-top: 6px;
+    }
+
+    .section-body.collapsed {
+      display: none;
+    }
+
+    .collisions-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 8px;
+    }
+
+    .collisions-title {
+      margin: 0;
+      font-size: 12px;
+      font-weight: 700;
+      line-height: 1.2;
+    }
+
+    .collisions-meta {
+      font-size: 9px;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+
+    .collision-groups {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .collision-group {
+      background: rgba(30,41,59,.50);
+      border: 1px solid rgba(148,163,184,.08);
+      border-radius: 10px;
+      padding: 10px;
+    }
+
+    .collision-byte {
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--accent);
+      margin-bottom: 8px;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+    }
+
+    .collision-list { display: grid; gap: 6px; }
+
+    .collision-item {
+      background: rgba(15,23,42,.38);
+      border: 1px solid rgba(148,163,184,.08);
+      border-radius: 8px;
+      padding: 7px 8px;
+    }
+
+    .collision-name {
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .collision-meta-line {
+      margin-top: 3px;
+      font-size: 10px;
+      color: var(--muted);
+      word-break: break-word;
+    }
+
+    .collision-badge {
+      display: inline-block;
+      margin-left: 6px;
+      padding: 1px 6px;
+      border-radius: 999px;
+      font-size: 9px;
+      font-weight: 700;
+      background: rgba(96,165,250,.18);
+      color: #bfdbfe;
+      border: 1px solid rgba(96,165,250,.22);
+    }
+
     .neighbors-panel {
       background: linear-gradient(180deg, rgba(26,38,58,.96), rgba(18,28,44,.98));
       border-radius: 14px;
@@ -423,13 +551,15 @@ HTML = r"""
 
     .neighbors-title {
       margin: 0;
-      font-size: 13px;
+      font-size: 12px;
       font-weight: 700;
+      line-height: 1.2;
     }
 
     .neighbors-meta {
-      font-size: 10px;
+      font-size: 9px;
       color: var(--muted);
+      white-space: nowrap;
     }
 
     .neighbors-list {
@@ -545,6 +675,7 @@ HTML = r"""
 
     @media (max-width: 980px) {
       .cards { grid-template-columns: repeat(2, 1fr); }
+      .collision-groups { grid-template-columns: 1fr; }
       .neighbors-list { grid-template-columns: 1fr; }
     }
 
@@ -635,13 +766,33 @@ HTML = r"""
     <span class="toolbar-item" id="poll-summary">Polls 24h: --</span>
   </div>
 
-  <div class="neighbors-panel">
-    <div class="neighbors-head">
-      <div class="neighbors-title">Neighbours</div>
-      <div class="neighbors-meta" id="neighbors-meta">snapshot: -- • count: --</div>
+  <div class="collisions-panel">
+    <button class="section-toggle" id="collisions-toggle" type="button" aria-expanded="true">
+      <span class="section-toggle-left">
+        <span class="section-toggle-arrow" id="collisions-toggle-arrow">▼</span>
+        <span class="collisions-title">Repeater first-byte collisions</span>
+      </span>
+      <span class="collisions-meta" id="collisions-meta">snapshot: -- • groups: --</span>
+    </button>
+    <div class="section-body" id="collisions-body">
+      <div class="collision-groups" id="collision-groups">
+        <div class="neighbors-empty">No repeater first-byte collisions</div>
+      </div>
     </div>
-    <div class="neighbors-list" id="neighbors-list">
-      <div class="neighbors-empty">No neighbour data</div>
+  </div>
+
+  <div class="neighbors-panel">
+    <button class="section-toggle" id="neighbors-toggle" type="button" aria-expanded="true">
+      <span class="section-toggle-left">
+        <span class="section-toggle-arrow" id="neighbors-toggle-arrow">▼</span>
+        <span class="neighbors-title">Neighbours</span>
+      </span>
+      <span class="neighbors-meta" id="neighbors-meta">snapshot: -- • count: --</span>
+    </button>
+    <div class="section-body" id="neighbors-body">
+      <div class="neighbors-list" id="neighbors-list">
+        <div class="neighbors-empty">No neighbour data</div>
+      </div>
     </div>
   </div>
 
@@ -716,6 +867,8 @@ let latestPollValid24h = null;
 let latestPollSuccessRate24h = null;
 let latestNeighbours = [];
 let latestNeighboursCollectedTs = null;
+let latestRepeaterCollisionGroups = [];
+let latestRepeaterCollisionTs = null;
 
 let battery24hMinV = null;
 let battery24hMaxV = null;
@@ -1010,7 +1163,7 @@ function renderNeighboursPanel() {
   if (!metaEl || !listEl) return;
 
   const rows = Array.isArray(latestNeighbours) ? latestNeighbours : [];
-  metaEl.textContent = `snapshot: ${fmtDateTime(latestNeighboursCollectedTs)} • count: ${rows.length}`;
+  metaEl.textContent = `updated ${fmtDateTime(latestNeighboursCollectedTs)} • ${rows.length} links`;
 
   if (!rows.length) {
     listEl.innerHTML = '<div class="neighbors-empty">No neighbour data</div>';
@@ -1030,6 +1183,42 @@ function renderNeighboursPanel() {
         </div>
         <div class="neighbor-snr">${snr}</div>
         <div class="neighbor-seen">${seen}</div>
+      </div>`;
+  }).join('');
+}
+
+function renderRepeaterCollisionPanel() {
+  const metaEl = document.getElementById('collisions-meta');
+  const listEl = document.getElementById('collision-groups');
+  if (!metaEl || !listEl) return;
+
+  const groups = Array.isArray(latestRepeaterCollisionGroups) ? latestRepeaterCollisionGroups : [];
+  metaEl.textContent = `updated ${fmtDateTime(latestRepeaterCollisionTs)} • ${groups.length} groups`;
+
+  if (!groups.length) {
+    listEl.innerHTML = '<div class="neighbors-empty">No repeater first-byte collisions</div>';
+    return;
+  }
+
+  listEl.innerHTML = groups.map((group) => {
+    const byteText = escapeHtml(group.first_byte || '--');
+    const repeaters = Array.isArray(group.repeaters) ? group.repeaters : [];
+    const itemsHtml = repeaters.map((item, idx) => {
+      const name = escapeHtml(item.contact_name || item.current_pubkey_pre || 'unknown');
+      const pubkeyPre = escapeHtml(item.current_pubkey_pre || '--');
+      const firstSeen = escapeHtml(item.first_seen_ts || '--');
+      const badge = idx === 0 ? '<span class="collision-badge">first</span>' : '';
+      return `
+        <div class="collision-item">
+          <div class="collision-name">${name}${badge}</div>
+          <div class="collision-meta-line">${pubkeyPre} • first seen ${firstSeen}</div>
+        </div>`;
+    }).join('');
+
+    return `
+      <div class="collision-group">
+        <div class="collision-byte">${byteText}</div>
+        <div class="collision-list">${itemsHtml}</div>
       </div>`;
   }).join('');
 }
@@ -1319,6 +1508,48 @@ async function syncServerTime() {
     serverTimeMs = dt.getTime();
   }
   updateFreshnessOnly();
+}
+
+function initCollisionsToggle() {
+  const toggle = document.getElementById('collisions-toggle');
+  const body = document.getElementById('collisions-body');
+  if (!toggle || !body) return;
+
+  const saved = localStorage.getItem('collisionsCollapsed') === '1';
+
+  function apply(collapsed) {
+    toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    body.classList.toggle('collapsed', collapsed);
+  }
+
+  apply(saved);
+
+  toggle.addEventListener('click', () => {
+    const collapsed = toggle.getAttribute('aria-expanded') === 'true';
+    apply(collapsed);
+    localStorage.setItem('collisionsCollapsed', collapsed ? '1' : '0');
+  });
+}
+
+function initNeighboursToggle() {
+  const toggle = document.getElementById('neighbors-toggle');
+  const body = document.getElementById('neighbors-body');
+  if (!toggle || !body) return;
+
+  const saved = localStorage.getItem('neighborsCollapsed') === '1';
+
+  function apply(collapsed) {
+    toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    body.classList.toggle('collapsed', collapsed);
+  }
+
+  apply(saved);
+
+  toggle.addEventListener('click', () => {
+    const collapsed = toggle.getAttribute('aria-expanded') === 'true';
+    apply(collapsed);
+    localStorage.setItem('neighborsCollapsed', collapsed ? '1' : '0');
+  });
 }
 
 function initBatteryModeToggle() {
@@ -1656,6 +1887,8 @@ async function loadLatest() {
   latestPollSuccessRate24h = d.poll_success_rate_24h == null ? null : Number(d.poll_success_rate_24h);
   latestNeighboursCollectedTs = d.neighbours_collected_ts || null;
   latestNeighbours = Array.isArray(d.neighbours) ? d.neighbours : [];
+  latestRepeaterCollisionTs = d.repeater_prefix_collisions_collected_ts || null;
+  latestRepeaterCollisionGroups = Array.isArray(d.repeater_prefix_collisions) ? d.repeater_prefix_collisions : [];
 
   if (fetchedUptimeSecs != null && !isNaN(fetchedUptimeSecs)) {
     if (latestUptimeSecs == null || isNaN(latestUptimeSecs)) {
@@ -1694,6 +1927,7 @@ async function loadLatest() {
   renderNoiseCard();
   renderLinkCard();
   renderUptimeDisplay();
+  renderRepeaterCollisionPanel();
   renderNeighboursPanel();
 
   const pollSummaryEl = document.getElementById('poll-summary');
@@ -1709,6 +1943,8 @@ async function loadLatest() {
 }
 
 (async function init() {
+  initCollisionsToggle();
+  initNeighboursToggle();
   initBatteryModeToggle();
   initRangeSelector();
   await loadRepeaterSummaries();
@@ -1944,6 +2180,8 @@ def api_latest():
 
             neighbours_collected_ts = None
             neighbour_rows = []
+            repeater_collision_groups = []
+            repeater_collision_collected_ts = None
 
             try:
                 node_for_neighbours = row.get("node") or node
@@ -1977,6 +2215,48 @@ def api_latest():
                     neighbour_rows = cur.fetchall() or []
             except Exception as e:
                 app.logger.warning("Neighbour query failed: %s", e)
+
+            try:
+                cur.execute(
+                    """
+                    SELECT MAX(last_seen_ts) AS repeater_collision_collected_ts
+                    FROM repeater_contact_current
+                    """
+                )
+                collision_meta_row = cur.fetchone() or {}
+                repeater_collision_collected_ts = collision_meta_row.get("repeater_collision_collected_ts")
+
+                cur.execute(
+                    """
+                    SELECT
+                        first_byte,
+                        contact_name,
+                        current_pubkey_pre,
+                        first_seen_ts,
+                        last_seen_ts
+                    FROM repeater_contact_current
+                    WHERE first_byte IN (
+                        SELECT first_byte
+                        FROM repeater_contact_current
+                        GROUP BY first_byte
+                        HAVING COUNT(*) > 1
+                    )
+                    ORDER BY first_byte ASC, first_seen_ts ASC, contact_name ASC
+                    """
+                )
+                collision_rows = cur.fetchall() or []
+                grouped: dict[str, list[dict]] = {}
+                for item in collision_rows:
+                    first_byte = str(item.get("first_byte") or "").lower()
+                    if not first_byte:
+                        continue
+                    grouped.setdefault(first_byte, []).append(item)
+                repeater_collision_groups = [
+                    {"first_byte": key, "repeater_count": len(value), "repeaters": value}
+                    for key, value in grouped.items()
+                ]
+            except Exception as e:
+                app.logger.warning("Repeater collision query failed: %s", e)
     finally:
         conn.close()
 
@@ -1991,6 +2271,20 @@ def api_latest():
         if n.get("secs_ago") is not None:
             n["secs_ago"] = int(n["secs_ago"])
     row["neighbours"] = neighbour_rows
+
+    if repeater_collision_collected_ts:
+        row["repeater_prefix_collisions_collected_ts"] = repeater_collision_collected_ts.strftime("%Y-%m-%d %H:%M:%S")
+    else:
+        row["repeater_prefix_collisions_collected_ts"] = None
+
+    for group in repeater_collision_groups:
+        for item in group.get("repeaters", []):
+            if item.get("first_seen_ts"):
+                item["first_seen_ts"] = item["first_seen_ts"].strftime("%Y-%m-%d %H:%M:%S")
+            if item.get("last_seen_ts"):
+                item["last_seen_ts"] = item["last_seen_ts"].strftime("%Y-%m-%d %H:%M:%S")
+
+    row["repeater_prefix_collisions"] = repeater_collision_groups
 
     if row.get("poll_total_24h"):
         row["poll_success_rate_24h"] = round(
