@@ -476,6 +476,23 @@ HTML = r"""
       white-space: nowrap;
     }
 
+    .collision-mode-row {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      flex-wrap: wrap;
+      margin-bottom: 8px;
+      color: var(--muted);
+      font-size: 10px;
+    }
+
+    .collision-mode-row label {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      cursor: pointer;
+    }
+
     .collision-groups {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -858,13 +875,18 @@ HTML = r"""
     <button class="section-toggle" id="collisions-toggle" type="button" aria-expanded="true">
       <span class="section-toggle-left">
         <span class="section-toggle-arrow" id="collisions-toggle-arrow">▼</span>
-        <span class="collisions-title">Repeater first-byte collisions</span>
+        <span class="collisions-title">Repeater prefix collisions</span>
       </span>
       <span class="collisions-meta" id="collisions-meta">snapshot: -- • groups: --</span>
     </button>
     <div class="section-body" id="collisions-body">
+      <div class="collision-mode-row">
+        <label><input type="radio" name="collision-prefix-mode" value="1" checked> 1-byte prefix</label>
+        <label><input type="radio" name="collision-prefix-mode" value="2"> 2-byte prefix</label>
+      </div>
+
       <div class="collision-groups" id="collision-groups">
-        <div class="neighbors-empty">No repeater first-byte collisions</div>
+        <div class="neighbors-empty">No repeater prefix collisions</div>
       </div>
 
       <div class="contact-prefix-tool">
@@ -968,7 +990,9 @@ let latestPollSuccessRate24h = null;
 let latestNeighbours = [];
 let latestNeighboursCollectedTs = null;
 let latestRepeaterCollisionGroups = [];
+let latestRepeaterCollisionGroups2b = [];
 let latestRepeaterCollisionTs = null;
+let collisionPrefixMode = '1';
 let latestContactPrefixResults = [];
 let latestContactPrefixValue = "";
 let contactPrefixLookupTimer = null;
@@ -1266,7 +1290,7 @@ function renderNeighboursPanel() {
   if (!metaEl || !listEl) return;
 
   const rows = Array.isArray(latestNeighbours) ? latestNeighbours : [];
-  metaEl.textContent = `updated ${fmtDateTime(latestNeighboursCollectedTs)} • ${rows.length} links`;
+  metaEl.textContent = `snapshot ${fmtDateTime(latestNeighboursCollectedTs)} • ${rows.length} links`;
 
   if (!rows.length) {
     listEl.innerHTML = '<div class="neighbors-empty">No neighbour data</div>';
@@ -1295,16 +1319,23 @@ function renderRepeaterCollisionPanel() {
   const listEl = document.getElementById('collision-groups');
   if (!metaEl || !listEl) return;
 
-  const groups = Array.isArray(latestRepeaterCollisionGroups) ? latestRepeaterCollisionGroups : [];
-  metaEl.textContent = `updated ${fmtDateTime(latestRepeaterCollisionTs)} • ${groups.length} groups`;
+  const groups = collisionPrefixMode === '2'
+    ? (Array.isArray(latestRepeaterCollisionGroups2b) ? latestRepeaterCollisionGroups2b : [])
+    : (Array.isArray(latestRepeaterCollisionGroups) ? latestRepeaterCollisionGroups : []);
+
+  const modeLabel = collisionPrefixMode === '2' ? '2-byte' : '1-byte';
+  metaEl.textContent = `snapshot ${fmtDateTime(latestRepeaterCollisionTs)} • ${groups.length} collision groups • ${modeLabel}`;
 
   if (!groups.length) {
-    listEl.innerHTML = '<div class="neighbors-empty">No repeater first-byte collisions</div>';
+    const emptyText = collisionPrefixMode === '2'
+      ? 'No repeater 2-byte prefix collisions'
+      : 'No repeater 1-byte prefix collisions';
+    listEl.innerHTML = `<div class="neighbors-empty">${emptyText}</div>`;
     return;
   }
 
   listEl.innerHTML = groups.map((group) => {
-    const byteText = escapeHtml(group.first_byte || '--');
+    const prefixText = escapeHtml(group.first_byte || group.prefix_2b || '--');
     const repeaters = Array.isArray(group.repeaters) ? group.repeaters : [];
     const itemsHtml = repeaters.map((item, idx) => {
       const name = escapeHtml(item.contact_name || item.current_pubkey_pre || 'unknown');
@@ -1320,7 +1351,7 @@ function renderRepeaterCollisionPanel() {
 
     return `
       <div class="collision-group">
-        <div class="collision-byte">${byteText}</div>
+        <div class="collision-byte">${prefixText}</div>
         <div class="collision-list">${itemsHtml}</div>
       </div>`;
   }).join('');
@@ -1712,6 +1743,18 @@ async function syncServerTime() {
   updateFreshnessOnly();
 }
 
+function initCollisionPrefixMode() {
+  const radios = document.querySelectorAll('input[name="collision-prefix-mode"]');
+  radios.forEach((radio) => {
+    radio.checked = radio.value === collisionPrefixMode;
+    radio.addEventListener('change', () => {
+      if (!radio.checked) return;
+      collisionPrefixMode = radio.value === '2' ? '2' : '1';
+      renderRepeaterCollisionPanel();
+    });
+  });
+}
+
 function initCollisionsToggle() {
   const toggle = document.getElementById('collisions-toggle');
   const body = document.getElementById('collisions-body');
@@ -2091,6 +2134,7 @@ async function loadLatest() {
   latestNeighbours = Array.isArray(d.neighbours) ? d.neighbours : [];
   latestRepeaterCollisionTs = d.repeater_prefix_collisions_collected_ts || null;
   latestRepeaterCollisionGroups = Array.isArray(d.repeater_prefix_collisions) ? d.repeater_prefix_collisions : [];
+  latestRepeaterCollisionGroups2b = Array.isArray(d.repeater_prefix_collisions_2b) ? d.repeater_prefix_collisions_2b : [];
 
   if (fetchedUptimeSecs != null && !isNaN(fetchedUptimeSecs)) {
     if (latestUptimeSecs == null || isNaN(latestUptimeSecs)) {
@@ -2145,6 +2189,7 @@ async function loadLatest() {
 }
 
 (async function init() {
+  initCollisionPrefixMode();
   initCollisionsToggle();
   initNeighboursToggle();
   initContactPrefixLookup();
@@ -2435,6 +2480,7 @@ def api_latest():
             neighbours_collected_ts = None
             neighbour_rows = []
             repeater_collision_groups = []
+            repeater_collision_groups_2b = []
             repeater_collision_collected_ts = None
 
             try:
@@ -2486,6 +2532,7 @@ def api_latest():
                         first_byte,
                         contact_name,
                         current_pubkey_pre,
+                        current_pubkey,
                         first_seen_ts,
                         last_seen_ts
                     FROM repeater_contact_current
@@ -2508,6 +2555,37 @@ def api_latest():
                 repeater_collision_groups = [
                     {"first_byte": key, "repeater_count": len(value), "repeaters": value}
                     for key, value in grouped.items()
+                ]
+
+                cur.execute(
+                    """
+                    SELECT
+                        LEFT(current_pubkey, 4) AS prefix_2b,
+                        contact_name,
+                        current_pubkey_pre,
+                        current_pubkey,
+                        first_seen_ts,
+                        last_seen_ts
+                    FROM repeater_contact_current
+                    WHERE LEFT(current_pubkey, 4) IN (
+                        SELECT LEFT(current_pubkey, 4)
+                        FROM repeater_contact_current
+                        GROUP BY LEFT(current_pubkey, 4)
+                        HAVING COUNT(*) > 1
+                    )
+                    ORDER BY LEFT(current_pubkey, 4) ASC, first_seen_ts ASC, contact_name ASC
+                    """
+                )
+                collision_rows_2b = cur.fetchall() or []
+                grouped_2b: dict[str, list[dict]] = {}
+                for item in collision_rows_2b:
+                    prefix_2b = str(item.get("prefix_2b") or "").lower()
+                    if not prefix_2b:
+                        continue
+                    grouped_2b.setdefault(prefix_2b, []).append(item)
+                repeater_collision_groups_2b = [
+                    {"prefix_2b": key, "repeater_count": len(value), "repeaters": value}
+                    for key, value in grouped_2b.items()
                 ]
             except Exception as e:
                 app.logger.warning("Repeater collision query failed: %s", e)
@@ -2538,7 +2616,15 @@ def api_latest():
             if item.get("last_seen_ts"):
                 item["last_seen_ts"] = item["last_seen_ts"].strftime("%Y-%m-%d %H:%M:%S")
 
+    for group in repeater_collision_groups_2b:
+        for item in group.get("repeaters", []):
+            if item.get("first_seen_ts"):
+                item["first_seen_ts"] = item["first_seen_ts"].strftime("%Y-%m-%d %H:%M:%S")
+            if item.get("last_seen_ts"):
+                item["last_seen_ts"] = item["last_seen_ts"].strftime("%Y-%m-%d %H:%M:%S")
+
     row["repeater_prefix_collisions"] = repeater_collision_groups
+    row["repeater_prefix_collisions_2b"] = repeater_collision_groups_2b
 
     if row.get("poll_total_24h"):
         row["poll_success_rate_24h"] = round(
