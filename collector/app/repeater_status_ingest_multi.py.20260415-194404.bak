@@ -146,27 +146,6 @@ def get_contact_type(contact: dict | None) -> int | None:
     return None
 
 
-def get_contact_lastmod(contact: dict | None) -> int:
-    contact = unwrap_contact(contact)
-    if not contact:
-        return 0
-
-    for key in ("lastmod", "mod_time", "mtime"):
-        raw = contact.get(key)
-        if raw is None:
-            continue
-        if isinstance(raw, bool):
-            return int(raw)
-        if isinstance(raw, (int, float)):
-            return int(raw)
-        if isinstance(raw, str) and raw.strip():
-            try:
-                return int(float(raw.strip()))
-            except ValueError:
-                continue
-    return 0
-
-
 def is_repeater_contact(contact: dict | None) -> bool:
     return get_contact_type(contact) == 2
 
@@ -654,40 +633,6 @@ def db_prune_stale_meshcore_contacts(source_id: str, cutoff_ts: str) -> None:
     finally:
         conn.close()
 
-
-def db_delete_repeater_contact_aliases(source_id: str, current_pubkey: str, keep_contact_name_norm: str) -> None:
-    conn = db_connect()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                DELETE FROM repeater_contact_current
-                WHERE source_id = %s
-                  AND current_pubkey = %s
-                  AND contact_name_norm <> %s
-                """,
-                (source_id, current_pubkey, keep_contact_name_norm),
-            )
-    finally:
-        conn.close()
-
-
-def db_delete_meshcore_contact_aliases(source_id: str, current_pubkey: str, keep_contact_name_norm: str) -> None:
-    conn = db_connect()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                DELETE FROM meshcore_contact_current
-                WHERE source_id = %s
-                  AND current_pubkey = %s
-                  AND contact_name_norm <> %s
-                """,
-                (source_id, current_pubkey, keep_contact_name_norm),
-            )
-    finally:
-        conn.close()
-
 def db_upsert_meta(
     node: str,
     poll_state: str,
@@ -911,7 +856,7 @@ def save_meshcore_contacts(source_id: str, contacts_payload: dict) -> None:
 
         collected_ts = now_str()
         cutoff_ts = fmt_ts(datetime.now() - timedelta(days=max(1, CONTACT_PRUNE_MAX_AGE_DAYS)))
-        rows_by_pubkey: dict[str, dict] = {}
+        rows: list[dict] = []
 
         for item in contacts_payload.values():
             contact = unwrap_contact(item)
@@ -922,32 +867,19 @@ def save_meshcore_contacts(source_id: str, contacts_payload: dict) -> None:
             contact_pubkey = get_contact_pubkey(contact)
             contact_name_norm = normalize_contact_name(contact_name)
             contact_type = get_contact_type(contact)
-            contact_lastmod = get_contact_lastmod(contact)
 
             if not contact_name_norm or not contact_pubkey or contact_type is None:
                 continue
 
             contact_pubkey = contact_pubkey.lower()
-            row = {
-                "contact_name": contact_name or contact_name_norm,
-                "contact_name_norm": contact_name_norm,
-                "contact_type": int(contact_type),
-                "current_pubkey": contact_pubkey,
-                "current_pubkey_pre": contact_pubkey[:12],
-                "lastmod": contact_lastmod,
-            }
-
-            prev = rows_by_pubkey.get(contact_pubkey)
-            if prev is None or row["lastmod"] >= prev["lastmod"]:
-                rows_by_pubkey[contact_pubkey] = row
-
-        rows = sorted(rows_by_pubkey.values(), key=lambda x: (x["current_pubkey"], x["contact_name_norm"]))
-
-        for row in rows:
-            db_delete_meshcore_contact_aliases(
-                source_id=source_id,
-                current_pubkey=row["current_pubkey"],
-                keep_contact_name_norm=row["contact_name_norm"],
+            rows.append(
+                {
+                    "contact_name": contact_name or contact_name_norm,
+                    "contact_name_norm": contact_name_norm,
+                    "contact_type": int(contact_type),
+                    "current_pubkey": contact_pubkey,
+                    "current_pubkey_pre": contact_pubkey[:12],
+                }
             )
 
         db_upsert_meshcore_contacts(source_id, collected_ts, rows)
@@ -967,7 +899,7 @@ def save_repeater_contacts(source_id: str, contacts_payload: dict) -> None:
 
         collected_ts = now_str()
         cutoff_ts = fmt_ts(datetime.now() - timedelta(days=max(1, CONTACT_PRUNE_MAX_AGE_DAYS)))
-        rows_by_pubkey: dict[str, dict] = {}
+        rows: list[dict] = []
 
         for item in contacts_payload.values():
             contact = unwrap_contact(item)
@@ -977,32 +909,18 @@ def save_repeater_contacts(source_id: str, contacts_payload: dict) -> None:
             contact_name = get_contact_name(contact)
             contact_pubkey = get_contact_pubkey(contact)
             contact_name_norm = normalize_contact_name(contact_name)
-            contact_lastmod = get_contact_lastmod(contact)
-
             if not contact_name_norm or not contact_pubkey:
                 continue
 
             contact_pubkey = contact_pubkey.lower()
-            row = {
-                "contact_name": contact_name or contact_name_norm,
-                "contact_name_norm": contact_name_norm,
-                "current_pubkey": contact_pubkey,
-                "current_pubkey_pre": contact_pubkey[:12],
-                "first_byte": contact_pubkey[:2],
-                "lastmod": contact_lastmod,
-            }
-
-            prev = rows_by_pubkey.get(contact_pubkey)
-            if prev is None or row["lastmod"] >= prev["lastmod"]:
-                rows_by_pubkey[contact_pubkey] = row
-
-        rows = sorted(rows_by_pubkey.values(), key=lambda x: (x["current_pubkey"], x["contact_name_norm"]))
-
-        for row in rows:
-            db_delete_repeater_contact_aliases(
-                source_id=source_id,
-                current_pubkey=row["current_pubkey"],
-                keep_contact_name_norm=row["contact_name_norm"],
+            rows.append(
+                {
+                    "contact_name": contact_name or contact_name_norm,
+                    "contact_name_norm": contact_name_norm,
+                    "current_pubkey": contact_pubkey,
+                    "current_pubkey_pre": contact_pubkey[:12],
+                    "first_byte": contact_pubkey[:2],
+                }
             )
 
         db_upsert_repeater_contacts(source_id, collected_ts, rows)
